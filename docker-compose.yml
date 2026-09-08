@@ -22,6 +22,12 @@
 # has to be a real folder ON THE SERVER ITSELF -- if your scans live on a different machine (e.g.
 # your Windows PC), scp/rsync them into this folder first, the same way you already scp
 # app.bundle.js updates over. The app only ever sees folder names *relative* to this root.
+#
+# DATA_DIR points at a folder on the HOST that holds card-ledger.db -- the one file with your
+# entire collection AND every card photo in it (they're stored as embedded base64, not separate
+# image files). Deliberately a plain bind-mounted path rather than a Docker-managed named volume,
+# so it lands somewhere ordinary backup tooling (e.g. an appdata backup on Unraid) already sees,
+# instead of needing a separate `docker run ... cp` step to reach it.
 version: "3.8"
 
 services:
@@ -40,14 +46,20 @@ services:
       - PORT=8080
       - IMPORT_ROOT=/data/import
     volumes:
-      # Everything you scan and log lives in this one file -- back it up periodically.
-      - bench-data:/app/data
+      # Everything you scan and log lives in this one file -- see DATA_DIR note above.
+      - ${DATA_DIR:-/opt/bench-data}:/app/data
       # Live-mounted app code -- see APP_DIR note above.
       - ${APP_DIR:-/opt/bench-app}/public:/app/public
       - ${APP_DIR:-/opt/bench-app}/server.js:/app/server.js
       - ${APP_DIR:-/opt/bench-app}/bulk-import.js:/app/bulk-import.js
       # Bulk Auto-Import reads from here -- see IMPORT_DIR note above.
       - ${IMPORT_DIR:-/opt/bench-import}:/data/import
+    networks:
+      - proxynet
 
-volumes:
-  bench-data:
+networks:
+  # Pre-existing network your reverse proxy (and whatever's serving bench.mackgreen.com) lives
+  # on -- created by that other stack, not this one, so it's declared external rather than
+  # letting Compose create its own default network for this project.
+  proxynet:
+    external: true

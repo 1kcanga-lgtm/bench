@@ -2,3 +2,5 @@ node_modules/
 data/
 *.tar.gz
 .DS_Store
+.env
+.env

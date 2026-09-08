@@ -715,6 +715,14 @@ async function callIdentifyOnce(dataUrls, allowSearch) {
     // attached at all on the escalation pass -- see identifyCardFromImages -- so most cards
     // (the ones the cheap first pass is already confident about) never pay for search at all.
     body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
+  } else {
+    // claude-sonnet-5 runs adaptive thinking by default when "thinking" is omitted (a change
+    // from claude-sonnet-4-6, where omitting it meant thinking-off) -- so this pass started
+    // paying for reasoning tokens as an unannounced side effect of the model swap above, not a
+    // deliberate choice. This is the cheap, no-search pass on a single clear photo -- extraction,
+    // not multi-step reasoning -- so turn it back off here. Left alone on the search-enabled
+    // escalation pass above, where the harder cards live and thinking is more likely to help.
+    body.thinking = { type: "disabled" };
   }
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -894,6 +902,10 @@ async function callAppraiseOnce(dataUrl) {
       // a rough number on all of these right now"; a precise, sourced value is one tap away
       // per-card once something's actually added to the ledger (that flow does search live).
       max_tokens: 4000,
+      // See callIdentifyOnce's no-search branch: claude-sonnet-5 runs adaptive thinking by
+      // default unless told otherwise, and this is a one-shot vision extraction with no search
+      // or multi-step reasoning involved -- turn it off.
+      thinking: { type: "disabled" },
       messages: [{ role: "user", content }],
     }),
   });
