@@ -1,0 +1,53 @@
+# Portainer Stack file for Bench (the Card Ledger app).
+#
+# This assumes you've already built the image once (Portainer -> Images -> Build a new image,
+# uploading card-ledger.tar.gz, tagged "card-ledger:latest" -- see README.md). If instead you're
+# deploying this via Portainer's "Repository" method against a git repo containing these files,
+# you can swap the "image:" line below for "build: ." and Portainer will build it for you.
+#
+# HOST_PORT defaults to 8091 (not 8080, which is a very commonly-used port and the reason the
+# first deploy attempt failed with "port is already allocated"). If 8091 is ALSO taken on your
+# server, set HOST_PORT to any other free port as a stack environment variable in Portainer --
+# no need to edit this file again. Check Portainer's Containers list to see what's already using
+# a given port if you're not sure.
+#
+# APP_DIR points at a folder on the Portainer HOST (not inside the container) that holds a live
+# copy of public/, server.js, and bulk-import.js. Mounting these instead of baking them into the
+# image means a future update is just "overwrite the file on disk over SSH" -- no more rebuilding
+# the image or recreating the container for ordinary app changes (see README.md's "Faster
+# updates" section). Set it up once, then leave it as-is.
+#
+# IMPORT_DIR points at a folder on the Portainer HOST where you drop the big folder-of-folders
+# for Bulk Auto-Import (one subfolder per card, containing that card's front/back photo). This
+# has to be a real folder ON THE SERVER ITSELF -- if your scans live on a different machine (e.g.
+# your Windows PC), scp/rsync them into this folder first, the same way you already scp
+# app.bundle.js updates over. The app only ever sees folder names *relative* to this root.
+version: "3.8"
+
+services:
+  bench:
+    image: card-ledger:latest
+    # build: .
+    container_name: bench
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8091}:8080"
+    environment:
+      # Leave blank to run without AI features (manual entry still works fully). Add your key
+      # here (or set it as a Portainer stack environment variable, which is safer than editing
+      # this file) to turn on card identification, appraisal, and price lookups.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=8080
+      - IMPORT_ROOT=/data/import
+    volumes:
+      # Everything you scan and log lives in this one file -- back it up periodically.
+      - bench-data:/app/data
+      # Live-mounted app code -- see APP_DIR note above.
+      - ${APP_DIR:-/opt/bench-app}/public:/app/public
+      - ${APP_DIR:-/opt/bench-app}/server.js:/app/server.js
+      - ${APP_DIR:-/opt/bench-app}/bulk-import.js:/app/bulk-import.js
+      # Bulk Auto-Import reads from here -- see IMPORT_DIR note above.
+      - ${IMPORT_DIR:-/opt/bench-import}:/data/import
+
+volumes:
+  bench-data:

@@ -1,0 +1,20 @@
+{
+  "name": "card-ledger-selfhost",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted Card Ledger (hockey card collection tracker) -- Express + SQLite backend, React frontend.",
+  "scripts": {
+    "build": "esbuild src/entry.jsx --bundle --minify --format=iife --jsx=automatic --outfile=public/app.bundle.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.3.0",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
