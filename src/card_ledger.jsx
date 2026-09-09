@@ -3229,6 +3229,39 @@ export default function CardLedger() {
     return getPair(card, "purchase");
   }
 
+  // Mirrors getDisplay's own fallback chain, but returns which source won instead of the
+  // image pair itself -- lets callers (e.g. the detail popup's rotate button) know whether
+  // what's currently on screen is a local photo (safe to rotate) or an online reference image
+  // (a remote URL we don't own and can't draw to a canvas).
+  function getDisplaySource(card) {
+    const primary = card.thumbnailSource || "online";
+    const chosen = getPair(card, primary);
+    if (chosen.front || chosen.back) return primary;
+    const fallback = primary === "online" ? "personal" : "online";
+    if (getPair(card, fallback).front || getPair(card, fallback).back) return fallback;
+    return "purchase";
+  }
+
+  // Rotates whichever local image (personal scan or purchase photo) is currently shown in the
+  // detail popup, 90 degrees clockwise. Only ever called next to a local data: URL -- never an
+  // online reference image, same restriction as the edit form's nudgeRotate (see its comment).
+  async function rotateDetailImage() {
+    if (!detailCard) return;
+    const isFront = !detailFlipped;
+    const scanKey = isFront ? "personalFront" : "personalBack";
+    const purchaseKey = isFront ? "purchasePhotoFront" : "purchasePhotoBack";
+    const current = detailCard[scanKey] || detailCard[purchaseKey];
+    if (!current) return;
+    const rotated = await rotateDataUrl(current, 90);
+    const updated = {
+      ...detailCard,
+      [scanKey]: detailCard[scanKey] ? rotated : detailCard[scanKey],
+      [purchaseKey]: detailCard[purchaseKey] ? rotated : detailCard[purchaseKey],
+    };
+    persist(cards.map((c) => (c.id === detailCard.id ? updated : c)));
+    setDetailCard(updated);
+  }
+
   const filtered = useMemo(() => {
     let list = cards;
     if (sportFilter !== "All") list = list.filter((c) => c.sport === sportFilter);
@@ -3427,6 +3460,7 @@ export default function CardLedger() {
         .tile-img-wrap img, .img-fallback { width: 100%; height: 100%; object-fit: contain; display: flex; align-items: center; justify-content: center; }
         .img-fallback { color: var(--muted); font-family: Georgia, serif; font-style: italic; font-size: 13px; text-align: center; padding: 10px; }
         .tile-flip-btn { position: absolute; top: 6px; right: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 7px; font-size: 11px; cursor: pointer; font-family: inherit; }
+        .tile-rotate-btn { position: absolute; top: 6px; left: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 8px; font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit; }
         .tile-source-toggle { position: absolute; bottom: 6px; left: 6px; right: 6px; display: flex; border-radius: 3px; overflow: hidden; font-size: 10.5px; }
         .tile-source-toggle button { flex: 1; border: none; padding: 4px 2px; cursor: pointer; font-family: inherit; background: rgba(255,255,255,0.85); color: var(--muted); }
         .tile-source-toggle button.active { background: var(--gold); color: #fff; }
@@ -3870,11 +3904,15 @@ export default function CardLedger() {
         const pair = getDisplay(detailCard);
         const shown = detailFlipped ? (pair.back || pair.front) : (pair.front || pair.back);
         const hasBoth = (detailCard.onlineFrontUrl || detailCard.onlineBackUrl) && (detailCard.personalFront || detailCard.personalBack);
+        const canRotate = getDisplaySource(detailCard) !== "online" && !!shown;
         return (
           <div className="overlay align-top" onClick={(e) => { if (e.target === e.currentTarget) closeDetail(); }}>
             <div className="detail-card">
               <div className="detail-img-wrap">
                 <CardImage src={shown} alt={detailCard.player} fallbackLabel="No photo yet" />
+                {canRotate && (
+                  <button className="tile-rotate-btn" title="Rotate 90° clockwise" onClick={rotateDetailImage}>⟳</button>
+                )}
                 {(pair.front && pair.back) && (
                   <button className="tile-flip-btn" onClick={() => setDetailFlipped((f) => !f)}>
                     {detailFlipped ? "Front" : "Back"}
