@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 
 const SPORTS = ["Baseball", "Basketball", "Football", "Hockey", "Soccer", "Other"];
 // A starter list for the brand datalist -- just suggestions, any brand can still be typed
@@ -2685,14 +2685,50 @@ export default function CardLedger() {
     })();
   }, []);
 
-  async function persist(next) {
-    setCards(next);
+  // The actual network save, split out from persist() below so the gallery rotate-fix flow can
+  // debounce just this part -- the collection round-trips as one JSON blob (every card, every
+  // embedded photo) on every save, so firing it on every single click is what was making rapid
+  // rotate-clicking feel like it hung on each one. Ordinary saves elsewhere still go through
+  // persist(), unchanged.
+  async function saveCollectionToServer(next) {
     try {
       const res = await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
       setSaveError(!res);
     } catch (e) {
       setSaveError(true);
     }
+  }
+
+  async function persist(next) {
+    setCards(next);
+    await saveCollectionToServer(next);
+  }
+
+  // Rotate-fix debounce: rapid clicks update the on-screen cards instantly (a pure local state
+  // update, no network wait), while the actual full-collection save is delayed until clicking
+  // has paused for a beat -- so ten quick rotates cost one save, not ten. `pendingRotateSaveRef`
+  // always holds the latest not-yet-sent `cards` array so nothing gets dropped if the user closes
+  // the tab or leaves edit mode mid-debounce (see flushPendingRotateSave / the edit-mode toggle).
+  const rotateSaveTimeoutRef = useRef(null);
+  const pendingRotateSaveRef = useRef(null);
+  function scheduleRotateSave(next) {
+    pendingRotateSaveRef.current = next;
+    if (rotateSaveTimeoutRef.current) clearTimeout(rotateSaveTimeoutRef.current);
+    rotateSaveTimeoutRef.current = setTimeout(() => {
+      rotateSaveTimeoutRef.current = null;
+      const toSave = pendingRotateSaveRef.current;
+      pendingRotateSaveRef.current = null;
+      if (toSave) saveCollectionToServer(toSave);
+    }, 700);
+  }
+  function flushPendingRotateSave() {
+    if (rotateSaveTimeoutRef.current) {
+      clearTimeout(rotateSaveTimeoutRef.current);
+      rotateSaveTimeoutRef.current = null;
+    }
+    const toSave = pendingRotateSaveRef.current;
+    pendingRotateSaveRef.current = null;
+    if (toSave) saveCollectionToServer(toSave);
   }
 
   // Rotates one already-saved card's own front or back photo directly from the gallery's "Fix
@@ -2713,12 +2749,19 @@ export default function CardLedger() {
       const current = card[scanKey] || card[purchaseKey];
       if (!current) return;
       const rotated = await rotateDataUrl(current, 90);
-      const updatedCard = {
-        ...card,
-        [scanKey]: card[scanKey] ? rotated : card[scanKey],
-        [purchaseKey]: card[purchaseKey] ? rotated : card[purchaseKey],
-      };
-      await persist(cards.map((c) => (c.id === cardId ? updatedCard : c)));
+      // Functional update (not a plain `cards.map` off the outer closure) so rotating a second
+      // card before the first one's state has re-rendered still lands on top of that first
+      // rotation instead of silently reverting it -- the whole point of making this fast is
+      // clicking through many cards back to back, so this has to hold up under that.
+      setCards((prevCards) => {
+        const next = prevCards.map((c) =>
+          c.id === cardId
+            ? { ...c, [scanKey]: c[scanKey] ? rotated : c[scanKey], [purchaseKey]: c[purchaseKey] ? rotated : c[purchaseKey] }
+            : c
+        );
+        scheduleRotateSave(next);
+        return next;
+      });
     } finally {
       setRotatingImage((prev) => (prev === key ? null : prev));
     }
@@ -3767,7 +3810,12 @@ export default function CardLedger() {
               <button
                 type="button"
                 className={galleryEditMode ? "btn-primary" : "btn-secondary"}
-                onClick={() => setGalleryEditMode((v) => !v)}
+                onClick={() => {
+                  // Leaving edit mode is the natural "I'm done" moment -- flush any rotate save
+                  // still waiting out its debounce instead of leaving it to fire on its own timer.
+                  if (galleryEditMode) flushPendingRotateSave();
+                  setGalleryEditMode((v) => !v);
+                }}
               >
                 {galleryEditMode ? "Done fixing rotation" : "Fix rotation"}
               </button>
