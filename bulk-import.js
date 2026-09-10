@@ -26,8 +26,9 @@ const sharp = require("sharp");
 
 // ---------------------------------------------------------------------------------------------
 // KEEP IN SYNC with card_ledger.jsx: MODEL_ID, PRICING, WEB_SEARCH_COST_USD, FIELDS_SCHEMA*,
-// identifyPromptOne/identifyPromptTwoUnordered, and the "needs a second, search-enabled pass"
-// condition in identifyCardFromImages.
+// identifyPromptOne/identifyPromptTwoUnordered, the "needs a second, search-enabled pass"
+// condition in identifyCardFromImages, and the thinking:{type:"disabled"} override on the
+// no-search pass in callIdentifyOnce.
 // ---------------------------------------------------------------------------------------------
 const MODEL_ID = "claude-sonnet-5";
 const PRICING = { "claude-sonnet-5": { input: 2 / 1e6, output: 10 / 1e6 } };
@@ -347,7 +348,14 @@ function buildIdentifyRequest(item, allowSearch) {
   const content = urls.map((d) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: toBase64(d) } }));
   content.push({ type: "text", text: urls.length === 2 ? identifyPromptTwoUnordered(allowSearch) : identifyPromptOne(allowSearch) });
   const params = { model: MODEL_ID, max_tokens: 3000, messages: [{ role: "user", content }] };
-  if (allowSearch) params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
+  if (allowSearch) {
+    params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
+  } else {
+    // KEEP IN SYNC with card_ledger.jsx's callIdentifyOnce: claude-sonnet-5 runs adaptive
+    // thinking by default when "thinking" is omitted, which this cheap no-search pass doesn't
+    // need (single-photo extraction, not multi-step reasoning) -- turn it off explicitly.
+    params.thinking = { type: "disabled" };
+  }
   return { custom_id: item.id, params };
 }
 

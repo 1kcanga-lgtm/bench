@@ -715,6 +715,14 @@ async function callIdentifyOnce(dataUrls, allowSearch) {
     // attached at all on the escalation pass -- see identifyCardFromImages -- so most cards
     // (the ones the cheap first pass is already confident about) never pay for search at all.
     body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
+  } else {
+    // claude-sonnet-5 runs adaptive thinking by default when "thinking" is omitted (a change
+    // from claude-sonnet-4-6, where omitting it meant thinking-off) -- so this pass started
+    // paying for reasoning tokens as an unannounced side effect of the model swap above, not a
+    // deliberate choice. This is the cheap, no-search pass on a single clear photo -- extraction,
+    // not multi-step reasoning -- so turn it back off here. Left alone on the search-enabled
+    // escalation pass above, where the harder cards live and thinking is more likely to help.
+    body.thinking = { type: "disabled" };
   }
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -894,6 +902,10 @@ async function callAppraiseOnce(dataUrl) {
       // a rough number on all of these right now"; a precise, sourced value is one tap away
       // per-card once something's actually added to the ledger (that flow does search live).
       max_tokens: 4000,
+      // See callIdentifyOnce's no-search branch: claude-sonnet-5 runs adaptive thinking by
+      // default unless told otherwise, and this is a one-shot vision extraction with no search
+      // or multi-step reasoning involved -- turn it off.
+      thinking: { type: "disabled" },
       messages: [{ role: "user", content }],
     }),
   });
@@ -2625,6 +2637,11 @@ export default function CardLedger() {
   const [viewMode, setViewMode] = useState("gallery");
   const [activeTab, setActiveTab] = useState("collection"); // collection | checklist | yg | bulk | appraise
   const [flipped, setFlipped] = useState({});
+  // "Fix rotation" mode: shows both of a card's own photos on its gallery tile with a rotate
+  // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
+  // straightened out a click at a time without opening the full detail/edit view for each one.
+  const [galleryEditMode, setGalleryEditMode] = useState(false);
+  const [rotatingImage, setRotatingImage] = useState(null); // `${cardId}-${face}` while a rotate is in flight
 
   const [checklistManual, setChecklistManual] = useState({});
   const [checklistQuery, setChecklistQuery] = useState("");
@@ -2678,6 +2695,35 @@ export default function CardLedger() {
     }
   }
 
+  // Rotates one already-saved card's own front or back photo directly from the gallery's "Fix
+  // rotation" mode -- same "rotate whichever local field is actually populated" logic as
+  // nudgeRotate (which operates on the scan/edit form's `form` state instead), applied straight
+  // to the saved `cards` array and persisted immediately, so there's no separate save step. Only
+  // ever called on a card's own personal/purchase photo, never an online reference image (a
+  // remote URL can't be rotated via canvas -- CORS -- and the gallery only offers this button
+  // next to a local thumbnail to begin with).
+  async function rotateGalleryImage(cardId, face) {
+    const key = `${cardId}-${face}`;
+    setRotatingImage(key);
+    try {
+      const card = cards.find((c) => c.id === cardId);
+      if (!card) return;
+      const scanKey = face === "front" ? "personalFront" : "personalBack";
+      const purchaseKey = face === "front" ? "purchasePhotoFront" : "purchasePhotoBack";
+      const current = card[scanKey] || card[purchaseKey];
+      if (!current) return;
+      const rotated = await rotateDataUrl(current, 90);
+      const updatedCard = {
+        ...card,
+        [scanKey]: card[scanKey] ? rotated : card[scanKey],
+        [purchaseKey]: card[purchaseKey] ? rotated : card[purchaseKey],
+      };
+      await persist(cards.map((c) => (c.id === cardId ? updatedCard : c)));
+    } finally {
+      setRotatingImage((prev) => (prev === key ? null : prev));
+    }
+  }
+
   async function persistChecklistManual(next) {
     setChecklistManual(next);
     try {
@@ -2724,42 +2770,51 @@ export default function CardLedger() {
     return { perSet, totalCards, totalOwned };
   }, [checklistMatches, checklistManual]);
 
-  // Renders the checklist as a clean, print-friendly page (via the browser's own print dialog --
-  // no PDF library needed, so this works with zero new dependencies) grouped by season with a
-  // checked/unchecked mark per card, then opens it in a new tab and triggers Print immediately so
-  // "Save as PDF" is one click away in the destination picker.
-  function exportChecklistPdf() {
+  // Shared HTML/print helper behind every "Export PDF" button in the app. Renders a clean,
+  // print-friendly page (via the browser's own print dialog -- no PDF library needed) then opens
+  // it in a new tab and triggers Print immediately, so "Save as PDF" is one click away in the
+  // destination picker. Every export is a missing-cards-only "shopping list" -- blank checkboxes
+  // throughout (there's nothing to un-check on paper at a card show), and a season/subsection
+  // with nothing missing is dropped entirely rather than printed empty. `sections` lets a single
+  // PDF cover more than one checklist (Young Guns' own list plus its separate alumni list) while
+  // keeping one shared header/summary line for the whole export.
+  function exportMissingChecklistPdf({ docTitle, heading, missingCount, sections }) {
     const escapeHtml = (s) =>
       String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-    const seasonsHtml = checklistProgress.perSet
-      .map((set) => {
-        const rows = set.cards
-          .map((entry) => {
-            const key = checklistEntryKey(set.year, entry.n);
-            const owned = checklistMatches.has(key) || !!checklistManual[key];
-            const mark = owned ? "☑" : "☐";
-            const num = entry.n !== null && entry.n !== undefined && entry.n !== "" ? `#${escapeHtml(entry.n)}` : "";
-            return `<div class="card-row ${owned ? "owned" : "missing"}"><span class="mark">${mark}</span><span class="num">${num}</span><span class="name">${escapeHtml(entry.p)}</span></div>`;
+    const sectionsHtml = sections
+      .map((section) => {
+        const seasonsHtml = section.perSet
+          .map((set) => {
+            const missing = set.cards.filter((entry) => !section.isOwned(set.year, entry.n));
+            if (missing.length === 0) return "";
+            const rows = missing
+              .map((entry) => {
+                const num = entry.n !== null && entry.n !== undefined && entry.n !== "" ? `#${escapeHtml(entry.n)}` : "";
+                return `<div class="card-row missing"><span class="mark">☐</span><span class="num">${num}</span><span class="name">${escapeHtml(entry.p)}</span></div>`;
+              })
+              .join("");
+            return `<section class="season"><h2><span>${escapeHtml(set.year)} ${escapeHtml(set.setName)} <span class="team">— ${escapeHtml(set.team)}</span></span><span class="season-count">${missing.length} missing</span></h2><div class="card-grid">${rows}</div></section>`;
           })
           .join("");
-        return `<section class="season"><h2><span>${escapeHtml(set.year)} ${escapeHtml(set.setName)} <span class="team">— ${escapeHtml(set.team)}</span></span><span class="season-count">${set.ownedCount} / ${set.cards.length}</span></h2><div class="card-grid">${rows}</div></section>`;
+        if (!seasonsHtml) return "";
+        return (section.heading ? `<h2 class="section-heading">${escapeHtml(section.heading)}</h2>` : "") + seasonsHtml;
       })
       .join("");
 
     const generatedOn = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
-    const pct = checklistProgress.totalCards ? Math.round((checklistProgress.totalOwned / checklistProgress.totalCards) * 100) : 0;
 
     const html = `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Dallas Stars Checklist</title>
+<title>${escapeHtml(docTitle)}</title>
 <style>
   body { font-family: Georgia, "Times New Roman", serif; color: #1a1a1a; margin: 0; padding: 28px; }
   h1 { font-size: 19px; margin: 0 0 4px; }
   .subtitle { font-size: 12px; color: #555; margin: 0 0 14px; }
   .summary { font-size: 14px; font-weight: bold; margin: 0 0 22px; padding: 8px 12px; background: #f2efe6; border: 1px solid #cfc9b8; display: inline-block; }
+  .section-heading { font-size: 15px; margin: 22px 0 10px; padding-top: 10px; border-top: 2px solid #1a1a1a; }
   .season { break-inside: avoid; page-break-inside: avoid; margin-bottom: 16px; }
   .season h2 { font-size: 13.5px; border-bottom: 1px solid #999; padding-bottom: 3px; margin: 0 0 6px; display: flex; justify-content: space-between; align-items: baseline; font-weight: 600; }
   .season h2 .team { font-weight: normal; color: #555; font-size: 12px; }
@@ -2767,18 +2822,16 @@ export default function CardLedger() {
   .card-grid { column-count: 3; column-gap: 18px; font-size: 11px; }
   .card-row { break-inside: avoid; display: flex; gap: 5px; padding: 1.5px 0; }
   .card-row .num { flex-shrink: 0; color: #555; width: 32px; }
-  .card-row.owned .name { font-weight: 600; }
-  .card-row.missing .name, .card-row.missing .num { color: #888; }
   @media print {
     @page { margin: 0.5in; size: letter; }
   }
 </style>
 </head>
 <body>
-  <h1>Dallas Stars / Minnesota North Stars — Upper Deck Base Checklist</h1>
-  <p class="subtitle">Exported from Bench on ${generatedOn}</p>
-  <div class="summary">${checklistProgress.totalOwned} / ${checklistProgress.totalCards} cards owned (${pct}%)</div>
-  ${seasonsHtml}
+  <h1>${escapeHtml(heading)}</h1>
+  <p class="subtitle">Exported from Bench on ${generatedOn} -- take this to a card show and check off what you pick up</p>
+  <div class="summary">${missingCount} card${missingCount === 1 ? "" : "s"} still needed</div>
+  ${sectionsHtml}
 </body>
 </html>`;
 
@@ -2792,6 +2845,39 @@ export default function CardLedger() {
     win.document.close();
     win.focus();
     setTimeout(() => win.print(), 300);
+  }
+
+  function isStarsCardOwned(year, n) {
+    const key = checklistEntryKey(year, n);
+    return checklistMatches.has(key) || !!checklistManual[key];
+  }
+
+  function isAlumniYgCardOwned(year, n) {
+    const key = checklistEntryKey(year, n);
+    return alumniChecklistMatches.has(key) || !!checklistManual[key];
+  }
+
+  function exportStarsChecklistPdf() {
+    exportMissingChecklistPdf({
+      docTitle: "Dallas Stars Checklist",
+      heading: "Dallas Stars / Minnesota North Stars — Upper Deck Base Checklist (Missing Cards)",
+      missingCount: checklistProgress.totalCards - checklistProgress.totalOwned,
+      sections: [{ perSet: checklistProgress.perSet, isOwned: isStarsCardOwned }],
+    });
+  }
+
+  function exportYoungGunsChecklistPdf() {
+    const missingCount =
+      youngGunsProgress.totalCards - youngGunsProgress.totalOwned + (alumniYgProgress.totalCards - alumniYgProgress.totalOwned);
+    exportMissingChecklistPdf({
+      docTitle: "Dallas Stars Young Guns Checklist",
+      heading: "Dallas Stars / Minnesota North Stars — Young Guns Checklist (Missing Cards)",
+      missingCount,
+      sections: [
+        { perSet: youngGunsProgress.perSet, isOwned: isStarsCardOwned },
+        { heading: "Stars alumni — Young Guns from other teams", perSet: alumniYgProgress.perSet, isOwned: isAlumniYgCardOwned },
+      ],
+    });
   }
 
   // Young Guns is just the base checklist filtered down to cards flagged yg:true --
@@ -3217,6 +3303,39 @@ export default function CardLedger() {
     return getPair(card, "purchase");
   }
 
+  // Mirrors getDisplay's own fallback chain, but returns which source won instead of the
+  // image pair itself -- lets callers (e.g. the detail popup's rotate button) know whether
+  // what's currently on screen is a local photo (safe to rotate) or an online reference image
+  // (a remote URL we don't own and can't draw to a canvas).
+  function getDisplaySource(card) {
+    const primary = card.thumbnailSource || "online";
+    const chosen = getPair(card, primary);
+    if (chosen.front || chosen.back) return primary;
+    const fallback = primary === "online" ? "personal" : "online";
+    if (getPair(card, fallback).front || getPair(card, fallback).back) return fallback;
+    return "purchase";
+  }
+
+  // Rotates whichever local image (personal scan or purchase photo) is currently shown in the
+  // detail popup, 90 degrees clockwise. Only ever called next to a local data: URL -- never an
+  // online reference image, same restriction as the edit form's nudgeRotate (see its comment).
+  async function rotateDetailImage() {
+    if (!detailCard) return;
+    const isFront = !detailFlipped;
+    const scanKey = isFront ? "personalFront" : "personalBack";
+    const purchaseKey = isFront ? "purchasePhotoFront" : "purchasePhotoBack";
+    const current = detailCard[scanKey] || detailCard[purchaseKey];
+    if (!current) return;
+    const rotated = await rotateDataUrl(current, 90);
+    const updated = {
+      ...detailCard,
+      [scanKey]: detailCard[scanKey] ? rotated : detailCard[scanKey],
+      [purchaseKey]: detailCard[purchaseKey] ? rotated : detailCard[purchaseKey],
+    };
+    persist(cards.map((c) => (c.id === detailCard.id ? updated : c)));
+    setDetailCard(updated);
+  }
+
   const filtered = useMemo(() => {
     let list = cards;
     if (sportFilter !== "All") list = list.filter((c) => c.sport === sportFilter);
@@ -3415,6 +3534,7 @@ export default function CardLedger() {
         .tile-img-wrap img, .img-fallback { width: 100%; height: 100%; object-fit: contain; display: flex; align-items: center; justify-content: center; }
         .img-fallback { color: var(--muted); font-family: Georgia, serif; font-style: italic; font-size: 13px; text-align: center; padding: 10px; }
         .tile-flip-btn { position: absolute; top: 6px; right: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 7px; font-size: 11px; cursor: pointer; font-family: inherit; }
+        .tile-rotate-btn { position: absolute; top: 6px; left: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 8px; font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit; }
         .tile-source-toggle { position: absolute; bottom: 6px; left: 6px; right: 6px; display: flex; border-radius: 3px; overflow: hidden; font-size: 10.5px; }
         .tile-source-toggle button { flex: 1; border: none; padding: 4px 2px; cursor: pointer; font-family: inherit; background: rgba(255,255,255,0.85); color: var(--muted); }
         .tile-source-toggle button.active { background: var(--gold); color: #fff; }
@@ -3422,6 +3542,14 @@ export default function CardLedger() {
         .tile-player { font-weight: 600; font-size: 13.5px; line-height: 1.25; }
         .tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
         .tile-value { font-family: Georgia, serif; font-weight: 700; color: var(--navy); font-size: 13px; margin-top: 4px; }
+        .tile-editmode { cursor: default; }
+        .tile-rotate-row { display: flex; }
+        .tile-rotate-col { flex: 1; min-width: 0; }
+        .tile-rotate-col + .tile-rotate-col { border-left: 1px solid var(--paper-line); }
+        .tile-rotate-col .tile-img-wrap { aspect-ratio: 5 / 7; }
+        .tile-rotate-label { text-align: center; font-size: 10.5px; color: var(--muted); padding: 3px 0; background: #F7F4EA; }
+        .tile-rotate-btn { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; background: rgba(30,52,72,0.8); color: #fff; border: none; border-radius: 50%; font-size: 15px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+        .tile-rotate-btn:disabled { opacity: 0.6; cursor: default; }
 
         .overlay { position: fixed; inset: 0; background: rgba(20,20,15,0.45); display: flex; align-items: center; justify-content: center; padding: 30px 16px; z-index: 10; overflow-y: auto; }
         .overlay.align-top { align-items: flex-start; padding-top: 40px; }
@@ -3576,7 +3704,7 @@ export default function CardLedger() {
             </label>
             <button type="button" className="link-btn" onClick={() => setExpandedYears(Object.fromEntries(CHECKLIST_SETS.map((s) => [s.year, true])))}>Expand all</button>
             <button type="button" className="link-btn" onClick={() => setExpandedYears({})}>Collapse all</button>
-            <button type="button" className="link-btn" onClick={exportChecklistPdf}>Export PDF</button>
+            <button type="button" className="link-btn" onClick={exportStarsChecklistPdf}>Export PDF</button>
           </div>
         )}
 
@@ -3607,6 +3735,7 @@ export default function CardLedger() {
             >
               Collapse all
             </button>
+            <button type="button" className="link-btn" onClick={exportYoungGunsChecklistPdf}>Export PDF</button>
           </div>
         )}
 
@@ -3634,6 +3763,15 @@ export default function CardLedger() {
               <button className={viewMode === "gallery" ? "active" : ""} onClick={() => setViewMode("gallery")}>Gallery</button>
               <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")}>List</button>
             </div>
+            {viewMode === "gallery" && (
+              <button
+                type="button"
+                className={galleryEditMode ? "btn-primary" : "btn-secondary"}
+                onClick={() => setGalleryEditMode((v) => !v)}
+              >
+                {galleryEditMode ? "Done fixing rotation" : "Fix rotation"}
+              </button>
+            )}
           </div>
         )}
 
@@ -3751,6 +3889,43 @@ export default function CardLedger() {
         ) : viewMode === "gallery" ? (
           <div className="gallery-grid">
             {filtered.map((c) => {
+              if (galleryEditMode) {
+                return (
+                  <div className="tile tile-editmode" key={c.id}>
+                    <div className="tile-rotate-row">
+                      {["front", "back"].map((face) => {
+                        const localImg = face === "front" ? c.personalFront || c.purchasePhotoFront : c.personalBack || c.purchasePhotoBack;
+                        const onlineImg = face === "front" ? c.onlineFrontUrl : c.onlineBackUrl;
+                        const rotKey = `${c.id}-${face}`;
+                        const isRotating = rotatingImage === rotKey;
+                        return (
+                          <div className="tile-rotate-col" key={face}>
+                            <div className="tile-img-wrap">
+                              <CardImage src={localImg || onlineImg} alt={`${c.player} ${face}`} fallbackLabel={face === "front" ? "No front photo" : "No back photo"} />
+                              {localImg && (
+                                <button
+                                  type="button"
+                                  className="tile-rotate-btn"
+                                  disabled={isRotating}
+                                  onClick={() => rotateGalleryImage(c.id, face)}
+                                  title={`Rotate ${face} 90° clockwise`}
+                                >
+                                  {isRotating ? "…" : "⟳"}
+                                </button>
+                              )}
+                            </div>
+                            <div className="tile-rotate-label">{face === "front" ? "Front" : "Back"}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="tile-info">
+                      <div className="tile-player">{c.player}</div>
+                      <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
+                    </div>
+                  </div>
+                );
+              }
               const pair = getDisplay(c);
               const shown = pair.front || pair.back;
               const hasBoth = (c.onlineFrontUrl || c.onlineBackUrl) && (c.personalFront || c.personalBack);
@@ -3858,11 +4033,15 @@ export default function CardLedger() {
         const pair = getDisplay(detailCard);
         const shown = detailFlipped ? (pair.back || pair.front) : (pair.front || pair.back);
         const hasBoth = (detailCard.onlineFrontUrl || detailCard.onlineBackUrl) && (detailCard.personalFront || detailCard.personalBack);
+        const canRotate = getDisplaySource(detailCard) !== "online" && !!shown;
         return (
           <div className="overlay align-top" onClick={(e) => { if (e.target === e.currentTarget) closeDetail(); }}>
             <div className="detail-card">
               <div className="detail-img-wrap">
                 <CardImage src={shown} alt={detailCard.player} fallbackLabel="No photo yet" />
+                {canRotate && (
+                  <button className="tile-rotate-btn" title="Rotate 90° clockwise" onClick={rotateDetailImage}>⟳</button>
+                )}
                 {(pair.front && pair.back) && (
                   <button className="tile-flip-btn" onClick={() => setDetailFlipped((f) => !f)}>
                     {detailFlipped ? "Front" : "Back"}
