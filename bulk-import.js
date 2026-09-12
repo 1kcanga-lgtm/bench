@@ -480,6 +480,10 @@ module.exports = function registerBulkImport(app, db, opts) {
      VALUES (?,?,?,?,?,?,?,?,?, 'pending')`
   );
   const updateJobStatus = db.prepare(`UPDATE bulk_jobs SET status=?, updated_at=? WHERE id=?`);
+  // Clears any stale error_message left over from an earlier failed tick -- a job that later
+  // ticks its way to "done" successfully shouldn't keep showing a "fetch failed" banner forever
+  // just because updateJobStatus never used to touch that column.
+  const markJobDone = db.prepare(`UPDATE bulk_jobs SET status='done', error_message=NULL, updated_at=? WHERE id=?`);
   const bumpJobCounts = db.prepare(
     `UPDATE bulk_jobs SET auto_added = auto_added + ?, needs_review = needs_review + ?, cost_usd = cost_usd + ?, updated_at=? WHERE id=?`
   );
@@ -812,17 +816,33 @@ module.exports = function registerBulkImport(app, db, opts) {
         itemsByStatus.all(job.id, "pending_pass2").length +
         itemsByStatus.all(job.id, "pass2_submitted").length;
       if (remaining === 0) {
-        updateJobStatus.run("done", new Date().toISOString(), job.id);
+        markJobDone.run(new Date().toISOString(), job.id);
       }
     } catch (err) {
       setJobError.run(String((err && err.message) || err), new Date().toISOString(), job.id);
     }
   }
 
+  // Reentrancy guard: without this, a tick that takes longer than the 45s interval below (slow
+  // network to Anthropic, a big batch, several active jobs) would still be running when the next
+  // interval fires, so a second tickAllJobs() could start processing the SAME job's SAME batch
+  // results before the first one had finished marking those items "saved" -- each overlapping
+  // pass would independently re-append the same cards to the ledger and re-bump auto_added,
+  // which is exactly what produced auto_added counts higher than total_items (and, worse, real
+  // duplicate cards in the collection -- see scripts/dedupe-cards.js). One tick running at a time
+  // closes that window; it does NOT need to be a database-level lock since only one Node process
+  // is ever running this file at a time.
+  let tickInFlight = false;
   async function tickAllJobs() {
-    const active = db.prepare(`SELECT * FROM bulk_jobs WHERE status='processing'`).all();
-    for (const job of active) {
-      await tickJob(job);
+    if (tickInFlight) return;
+    tickInFlight = true;
+    try {
+      const active = db.prepare(`SELECT * FROM bulk_jobs WHERE status='processing'`).all();
+      for (const job of active) {
+        await tickJob(job);
+      }
+    } finally {
+      tickInFlight = false;
     }
   }
 

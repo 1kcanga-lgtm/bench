@@ -63,6 +63,17 @@ const CHECKLIST_SETS = [
     cards: [{n:"43",p:"Mike Modano"}, {n:"44",p:"Derian Hatcher"}, {n:"45",p:"Todd Harvey"}, {n:"46",p:"Brent Fedyk"}, {n:"47",p:"Grant Marshall"}, {n:"48",p:"Jamie Langenbrunner"}, {n:"49",p:"Jere Lehtinen"}, {n:"245",p:"Joe Nieuwendyk"}, {n:"246",p:"Sergei Zubov"}, {n:"247",p:"Benoit Hogue"}, {n:"248",p:"Arturs Irbe"}, {n:"249",p:"Pat Verbeek"}, {n:"363",p:"Mike Modano"}],
   },
   {
+    // Not a flagship Upper Deck base set -- Collector's Choice was a separate budget sub-brand.
+    // Added as its own minimal "season" purely so Turek's Young Guns card (a real Dallas Stars
+    // card, confirmed against the physical card) shows up on the Young Guns tab, which filters
+    // CHECKLIST_SETS for yg:true. It will also appear as a 1-card "season" on the main Stars
+    // Checklist (base-set-completion) tab -- a known, accepted side effect of reusing this
+    // structure rather than a real gap in the checklist.
+    year: "1996-97", setName: "Collector's Choice - Young Guns", team: "Dallas Stars", baseSetSize: 1,
+    sourceUrl: "https://www.tcdb.com/ViewSet.cfm/sid/5247/1996-97-Collector's-Choice",
+    cards: [{n:"358",p:"Roman Turek",yg:true}],
+  },
+  {
     year: "1997-98", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 420,
     sourceUrl: "https://www.tcdb.com/ViewTeams.cfm/sid/5477/team/298/Dallas%20Stars",
     cards: [{n:"50",p:"Joe Nieuwendyk"}, {n:"51",p:"Derian Hatcher"}, {n:"52",p:"Jere Lehtinen"}, {n:"53",p:"Roman Turek"}, {n:"54",p:"Darryl Sydor"}, {n:"55",p:"Todd Harvey"}, {n:"56",p:"Mike Modano"}, {n:"259",p:"Ed Belfour"}, {n:"260",p:"Jamie Langenbrunner"}, {n:"261",p:"Juha Lind"}, {n:"262",p:"Pat Verbeek"}, {n:"263",p:"Sergei Zubov"}, {n:"264",p:"Dave Reid"}, {n:"265",p:"Greg Adams"}, {n:"397",p:"Derian Hatcher"}],
@@ -80,12 +91,12 @@ const CHECKLIST_SETS = [
   {
     year: "2000-01", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 440,
     sourceUrl: "https://www.tcdb.com/ViewTeams.cfm/sid/5572/team/298/Dallas%20Stars",
-    cards: [{n:"55",p:"Mike Modano"}, {n:"56",p:"Joe Nieuwendyk"}, {n:"57",p:"Mike Keane"}, {n:"58",p:"Darryl Sydor"}, {n:"59",p:"Brenden Morrow"}, {n:"60",p:"Jere Lehtinen"}, {n:"61",p:"Derian Hatcher"}, {n:"183",p:"Keith Aldridge"}, {n:"284",p:"Brett Hull"}, {n:"285",p:"Sergei Zubov"}, {n:"286",p:"Jamie Langenbrunner"}, {n:"287",p:"Ed Belfour"}, {n:"288",p:"Roman Lyashenko"}, {n:"289",p:"Ted Donato"}, {n:"428",p:"Marty Turco"}],
+    cards: [{n:"55",p:"Mike Modano"}, {n:"56",p:"Joe Nieuwendyk"}, {n:"57",p:"Mike Keane"}, {n:"58",p:"Darryl Sydor"}, {n:"59",p:"Brenden Morrow"}, {n:"60",p:"Jere Lehtinen"}, {n:"61",p:"Derian Hatcher"}, {n:"183",p:"Keith Aldridge",yg:true}, {n:"284",p:"Brett Hull"}, {n:"285",p:"Sergei Zubov"}, {n:"286",p:"Jamie Langenbrunner"}, {n:"287",p:"Ed Belfour"}, {n:"288",p:"Roman Lyashenko"}, {n:"289",p:"Ted Donato"}, {n:"428",p:"Marty Turco",yg:true}],
   },
   {
     year: "2001-02", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 441,
     sourceUrl: "https://www.tcdb.com/ViewTeams.cfm/sid/5615/team/298/Dallas%20Stars",
-    cards: [{n:"55",p:"Mike Modano"}, {n:"56",p:"Ed Belfour"}, {n:"57",p:"Pierre Turgeon"}, {n:"58",p:"Jamie Langenbrunner"}, {n:"59",p:"Brenden Morrow"}, {n:"60",p:"Donald Audette"}, {n:"284",p:"Sergei Zubov"}, {n:"285",p:"Jere Lehtinen"}, {n:"286",p:"Joe Nieuwendyk"}, {n:"287",p:"Darryl Sydor"}, {n:"288",p:"Rob DiMaio"}, {n:"289",p:"Valeri Kamensky"}, {n:"421",p:"Niko Kapanen"}],
+    cards: [{n:"55",p:"Mike Modano"}, {n:"56",p:"Ed Belfour"}, {n:"57",p:"Pierre Turgeon"}, {n:"58",p:"Jamie Langenbrunner"}, {n:"59",p:"Brenden Morrow"}, {n:"60",p:"Donald Audette"}, {n:"284",p:"Sergei Zubov"}, {n:"285",p:"Jere Lehtinen"}, {n:"286",p:"Joe Nieuwendyk"}, {n:"287",p:"Darryl Sydor"}, {n:"288",p:"Rob DiMaio"}, {n:"289",p:"Valeri Kamensky"}, {n:"421",p:"Niko Kapanen",yg:true}],
   },
   {
     year: "2002-03", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 456,
@@ -95,7 +106,7 @@ const CHECKLIST_SETS = [
   {
     year: "2003-04", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 475,
     sourceUrl: "https://www.tcdb.com/ViewTeams.cfm/sid/5713/team/298/Dallas%20Stars",
-    cards: [{n:"59",p:"Mike Modano"}, {n:"60",p:"Sergei Zubov"}, {n:"61",p:"Jere Lehtinen"}, {n:"62",p:"Steve Ott"}, {n:"63",p:"Niko Kapanen"}, {n:"64",p:"Jason Bacashihua"}, {n:"65",p:"Marty Turco"}, {n:"215",p:"Antti Miettinen"}, {n:"302",p:"Brenden Morrow"}, {n:"303",p:"Jason Arnott"}, {n:"304",p:"Pierre Turgeon"}, {n:"305",p:"Bill Guerin"}, {n:"306",p:"Teppo Numminen"}, {n:"307",p:"Ron Tugnutt"}, {n:"308",p:"Stu Barnes"}, {n:"467",p:"Trevor Daley"}],
+    cards: [{n:"59",p:"Mike Modano"}, {n:"60",p:"Sergei Zubov"}, {n:"61",p:"Jere Lehtinen"}, {n:"62",p:"Steve Ott"}, {n:"63",p:"Niko Kapanen"}, {n:"64",p:"Jason Bacashihua"}, {n:"65",p:"Marty Turco"}, {n:"215",p:"Antti Miettinen",yg:true}, {n:"302",p:"Brenden Morrow"}, {n:"303",p:"Jason Arnott"}, {n:"304",p:"Pierre Turgeon"}, {n:"305",p:"Bill Guerin"}, {n:"306",p:"Teppo Numminen"}, {n:"307",p:"Ron Tugnutt"}, {n:"308",p:"Stu Barnes"}, {n:"467",p:"Trevor Daley",yg:true}],
   },
   {
     year: "2004-05", setName: "Upper Deck", team: "Dallas Stars", baseSetSize: 210,
@@ -220,6 +231,7 @@ const CHECKLIST_NOTES = [
   "All checklists were pulled from TCDB (tradingcarddb.com) team-filtered set-checklist pages (ViewTeams.cfm) for the exact set id of each season's flagship 'Upper Deck' brand product, filtered to the Minnesota North Stars / Dallas Stars team. Card entries with multiple 'VAR' (hologram/back variation) sub-rows in TCDB were collapsed to a single entry per physical card number.",
   "This data was not cross-checked against a second independent source (e.g. Beckett or Cardboard Connection) for every single card; spot-checks were done for a few uncertain entries (1990-91 total count, card #35 in 1992-93, card #183 in 2000-01). Recommend a periodic sanity check against the physical cards as the collection is catalogued.",
   "2026-09-04: Card #547 (Neil Wilkinson, RC) was found missing from the 1990-91 set in this file and added after being spotted directly on TCDB -- a reminder that this data, while sourced from TCDB, has not been exhaustively cross-checked card-by-card and may still have gaps. If you spot another one, the fix is a one-line addition to the matching set entry in CHECKLIST_SETS.",
+  "2026-09-12: A physical Roman Turek 'Young Guns' card (1996-97 Upper Deck Collector's Choice #358, confirmed as a Dallas Stars-jersey card by the collector) surfaced a real gap: this file's Young Guns coverage only went back to 2005-06, missing three earlier Young Guns eras entirely -- flagship Upper Deck 1990-91 to 1992-93, the Collector's Choice Young Guns revival in 1995-96/1996-97, and flagship Upper Deck 1999-00 to 2004-05. Backfilled with yg:true flags on 5 already-present Dallas Stars own-team cards (Keith Aldridge #183 2000-01, Marty Turco #428 2000-01, Niko Kapanen #421 2001-02, Antti Miettinen #215 2003-04, Trevor Daley #467 2003-04), a new one-card Collector's Choice entry for Turek himself, and 6 new entries in STARS_ALUMNI_YOUNG_GUNS for Stars alumni whose real rookie Young Guns card was printed under a different team (Kip Miller, Donald Audette, Martin Rucinsky, Radek Dvorak, Patrik Stefan, Jason Spezza). Every card number/team pairing was cross-checked against at least two independent sources (TCDB, Cardboard Connection's Young Guns checklist, or eBay/COMC listings) plus Wikipedia for each alumnus's Dallas Stars tenure. Deliberately NOT included: the 2001-02 Upper Deck 'Young Guns Flashback' #218 Mike Modano card, since it's a nostalgia reprint of an already-veteran player rather than a real rookie card -- can be added if wanted.",
 ];
 
 // --- Stars alumni Young Guns ---------------------------------------------
@@ -234,6 +246,27 @@ const CHECKLIST_NOTES = [
 // snapshot, not exhaustive: if you find another Stars alumnus with a Young Guns card from
 // another team, add a line to the matching year below (or a new year block if needed).
 const STARS_ALUMNI_YOUNG_GUNS = [
+  // 1990-91 through 2002-03: the original/first-revival Young Guns eras (flagship Upper Deck
+  // 1990-91 to 1992-93, then Collector's Choice 1995-96 to 1996-97, then flagship again from
+  // 1999-00 onward) -- added 2026-09-12 after a gap was spotted; see CHECKLIST_NOTES for sourcing.
+  { year: "1990-91", entries: [
+    { n: "522", p: "Kip Miller", team: "Quebec Nordiques", note: "Also played for the Minnesota North Stars during his career." },
+  ]},
+  { year: "1991-92", entries: [
+    { n: "585", p: "Donald Audette", team: "Buffalo Sabres", note: "Played for Dallas Stars into the 2001-02 season; traded to Montreal (with Shaun Van Allen) for Martin Rucinsky and Benoit Brunet, Nov 2001." },
+  ]},
+  { year: "1992-93", entries: [
+    { n: "556", p: "Martin Rucinsky", team: "Quebec Nordiques", note: "Traded to Dallas from Montreal (with Benoit Brunet, for Donald Audette and Shaun Van Allen), Nov 2001; played for Dallas through Mar 2002." },
+  ]},
+  { year: "1995-96", setName: "Collector's Choice", entries: [
+    { n: "398", p: "Radek Dvorak", team: "Florida Panthers", note: "Signed with Dallas as a UFA in 2011, played the 2011-12 season." },
+  ]},
+  { year: "1999-00", entries: [
+    { n: "161", p: "Patrik Stefan", team: "Atlanta Thrashers", note: "Traded to Dallas from Atlanta (with Jaroslav Modry, for Niko Kapanen), June 2006; played for Dallas through 2007." },
+  ]},
+  { year: "2002-03", entries: [
+    { n: "443", p: "Jason Spezza", team: "Ottawa Senators", note: "Traded to Dallas from Ottawa, July 2014; played for Dallas through 2019 before signing with Toronto." },
+  ]},
   { year: "2005-06", entries: [
     { n: "204", p: "Corey Perry", team: "Anaheim Ducks", note: "Signed with Dallas as a UFA in 2019; played 2019-2021, including the 2020 Stanley Cup Final run." },
   ]},
@@ -287,11 +320,102 @@ const STARS_ALUMNI_YOUNG_GUNS = [
 // each card keeps its own `team` and `note` instead of the set carrying one team for everybody.
 const STARS_ALUMNI_YG_SETS = STARS_ALUMNI_YOUNG_GUNS.map((group) => ({
   year: group.year,
-  setName: "Upper Deck",
+  setName: group.setName || "Upper Deck",
   team: null,
   sourceUrl: null,
   cards: group.entries.map((e) => ({ n: e.n, p: e.p, team: e.team, note: e.note, yg: true })),
 }));
+
+// --- Young Guns series/wave lookup --------------------------------------
+// Which specific product wave (Series 1/2/3, "Extended Series", "High Series", or a
+// redemption-only insert) a card number actually shipped in -- this is what tells a collector
+// which packs (and which release date that season) could ever contain a given Young Guns card.
+// Added 2026-09-12 at Kaleb's request, so he can compare which packs are worth buying if he's
+// chasing a specific card. Only covers seasons that actually have a yg:true/alumni Young Guns
+// card in this file (not every CHECKLIST_SETS year) -- extend this table first if a Young Guns
+// card from an uncovered season is ever added. Every range below was researched from TCDB set
+// pages, cross-checked against a second independent source (Cardboard Connection,
+// checklistcenter.com, or a specific eBay/COMC listing quoting the range) -- see the project
+// notes doc for the full sourcing writeup.
+const YG_SERIES_RANGES = {
+  "1990-91": [{ name: "Low Series", min: 1, max: 400 }, { name: "High Series", min: 401, max: 550 }],
+  "1991-92": [{ name: "Low Series", min: 1, max: 500 }, { name: "High Series", min: 501, max: 700 }],
+  "1992-93": [{ name: "Low Series", min: 1, max: 440 }, { name: "High Series", min: 441, max: 640 }],
+  "1995-96": [
+    { name: "Base set", min: 1, max: 396 },
+    { name: "Young Guns — redemption only, not pack-pullable", min: 397, max: 411 },
+  ],
+  "1996-97": [
+    { name: "Base set", min: 1, max: 348 },
+    { name: "Young Guns — redemption only, not pack-pullable", min: 349, max: 363 },
+  ],
+  "1999-00": [{ name: "Series One", min: 1, max: 170 }, { name: "Series Two", min: 171, max: 335 }],
+  "2000-01": [{ name: "Series One", min: 1, max: 230 }, { name: "Series Two", min: 231, max: 440 }],
+  "2001-02": [{ name: "Series One", min: 1, max: 231 }, { name: "Series Two", min: 232, max: 441 }],
+  "2002-03": [{ name: "Series One", min: 1, max: 246 }, { name: "Series Two", min: 247, max: 456 }],
+  "2003-04": [{ name: "Series One", min: 1, max: 245 }, { name: "Series Two", min: 246, max: 475 }],
+  "2005-06": [{ name: "Series 1", min: 1, max: 242 }, { name: "Series 2", min: 243, max: 487 }],
+  "2006-07": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 495 }],
+  "2007-08": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2008-09": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2009-10": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2010-11": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2011-12": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  // Lockout-shortened season -- only one series was ever released, unlike every other year.
+  "2012-13": [{ name: "Series 1 (only series released this year)", min: 1, max: 250 }],
+  "2013-14": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2014-15": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2015-16": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2016-17": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2017-18": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2018-19": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  "2019-20": [{ name: "Series 1", min: 1, max: 250 }, { name: "Series 2", min: 251, max: 500 }],
+  // From 2020-21 on, a third wave ("Extended Series") ships separately, months after Series 2 --
+  // genuinely pack-obtainable (hobby/retail/blaster/e-pack), not a redemption program.
+  "2020-21": [
+    { name: "Series 1", min: 1, max: 250 },
+    { name: "Series 2", min: 251, max: 500 },
+    { name: "Extended Series", min: 501, max: 730 },
+  ],
+  "2021-22": [
+    { name: "Series 1", min: 1, max: 250 },
+    { name: "Series 2", min: 251, max: 500 },
+    { name: "Extended Series (base)", min: 501, max: 700 },
+    { name: "Extended Series — Young Guns", min: 701, max: 750 },
+  ],
+  // From 2022-23 on, Extended Series' rookie class itself splits into two named subsets --
+  // "Young Guns" and a separate "1st Round Rookies" insert for first-round picks only.
+  "2022-23": [
+    { name: "Series 1", min: 1, max: 250 },
+    { name: "Series 2", min: 251, max: 500 },
+    { name: "Extended Series (base)", min: 501, max: 700 },
+    { name: "Extended Series — Young Guns", min: 701, max: 730 },
+    { name: "Extended Series — 1st Round Rookies", min: 731, max: 750 },
+  ],
+  "2023-24": [
+    { name: "Series 1", min: 1, max: 250 },
+    { name: "Series 2", min: 251, max: 500 },
+    { name: "Extended Series (base)", min: 501, max: 700 },
+    { name: "Extended Series — Young Guns", min: 701, max: 730 },
+    { name: "Extended Series — 1st Round Rookies", min: 731, max: 750 },
+  ],
+  "2024-25": [
+    { name: "Series 1", min: 1, max: 250 },
+    { name: "Series 2", min: 251, max: 500 },
+    { name: "Extended Series (base)", min: 501, max: 700 },
+    { name: "Extended Series — Young Guns", min: 701, max: 730 },
+    { name: "Extended Series — 1st Round Rookies", min: 731, max: 750 },
+  ],
+};
+
+function getCardSeries(year, cardNumber) {
+  const ranges = YG_SERIES_RANGES[year];
+  if (!ranges) return null;
+  const n = parseInt(String(cardNumber).replace(/\D/g, ""), 10);
+  if (!Number.isFinite(n)) return null;
+  const match = ranges.find((r) => n >= r.min && n <= r.max);
+  return match ? match.name : null;
+}
 
 // --- Checklist matching helpers ---------------------------------------
 // A ledger entry is matched against a CHECKLIST_SETS row when: it's a Hockey
@@ -1050,6 +1174,7 @@ function ChecklistYearSection({
   onToggleManual,
   labelSuffix,
   mixedTeams,
+  showSeries,
 }) {
   const q = query.trim().toLowerCase();
   let entries = set.cards.filter((entry) => !q || normName(entry.p).includes(q));
@@ -1090,6 +1215,7 @@ function ChecklistYearSection({
               const auto = checklistMatches.get(key);
               const manual = !!checklistManual[key];
               const owned = !!auto || manual;
+              const series = showSeries ? getCardSeries(set.year, entry.n) : null;
               return (
                 <div className={`checklist-row${owned ? " owned" : ""}`} key={key}>
                   {auto ? (
@@ -1120,6 +1246,7 @@ function ChecklistYearSection({
                     {entry.p}
                   </button>
                   {mixedTeams && <span className="checklist-year-team checklist-row-team">{entry.team}</span>}
+                  {series && <span className="checklist-series-tag" title="Which pack wave/series this card actually shipped in">{series}</span>}
                   {auto && <span className="checklist-auto-tag">in ledger</span>}
                 </div>
               );
@@ -2821,7 +2948,7 @@ export default function CardLedger() {
   // with nothing missing is dropped entirely rather than printed empty. `sections` lets a single
   // PDF cover more than one checklist (Young Guns' own list plus its separate alumni list) while
   // keeping one shared header/summary line for the whole export.
-  function exportMissingChecklistPdf({ docTitle, heading, missingCount, sections }) {
+  function exportMissingChecklistPdf({ docTitle, heading, missingCount, sections, showSeries }) {
     const escapeHtml = (s) =>
       String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -2834,10 +2961,12 @@ export default function CardLedger() {
             const rows = missing
               .map((entry) => {
                 const num = entry.n !== null && entry.n !== undefined && entry.n !== "" ? `#${escapeHtml(entry.n)}` : "";
-                return `<div class="card-row missing"><span class="mark">☐</span><span class="num">${num}</span><span class="name">${escapeHtml(entry.p)}</span></div>`;
+                const series = showSeries ? getCardSeries(set.year, entry.n) : null;
+                const seriesHtml = series ? `<span class="series">${escapeHtml(series)}</span>` : "";
+                return `<div class="card-row missing"><span class="mark">☐</span><span class="num">${num}</span><span class="name">${escapeHtml(entry.p)}</span>${seriesHtml}</div>`;
               })
               .join("");
-            return `<section class="season"><h2><span>${escapeHtml(set.year)} ${escapeHtml(set.setName)} <span class="team">— ${escapeHtml(set.team)}</span></span><span class="season-count">${missing.length} missing</span></h2><div class="card-grid">${rows}</div></section>`;
+            return `<section class="season"><h2><span>${escapeHtml(set.year)} ${escapeHtml(set.setName)} <span class="team">— ${escapeHtml(set.team)}</span></span><span class="season-count">${missing.length} missing</span></h2><div class="card-grid${showSeries ? " with-series" : ""}">${rows}</div></section>`;
           })
           .join("");
         if (!seasonsHtml) return "";
@@ -2863,8 +2992,11 @@ export default function CardLedger() {
   .season h2 .team { font-weight: normal; color: #555; font-size: 12px; }
   .season h2 .season-count { font-weight: normal; font-size: 12px; color: #555; white-space: nowrap; margin-left: 10px; }
   .card-grid { column-count: 3; column-gap: 18px; font-size: 11px; }
+  .card-grid.with-series { column-count: 2; }
   .card-row { break-inside: avoid; display: flex; gap: 5px; padding: 1.5px 0; }
   .card-row .num { flex-shrink: 0; color: #555; width: 32px; }
+  .card-row .name { flex: 1; }
+  .card-row .series { flex-shrink: 0; color: #777; font-size: 9.5px; white-space: nowrap; padding-left: 6px; }
   @media print {
     @page { margin: 0.5in; size: letter; }
   }
@@ -2920,6 +3052,7 @@ export default function CardLedger() {
         { perSet: youngGunsProgress.perSet, isOwned: isStarsCardOwned },
         { heading: "Stars alumni — Young Guns from other teams", perSet: alumniYgProgress.perSet, isOwned: isAlumniYgCardOwned },
       ],
+      showSeries: true,
     });
   }
 
@@ -3547,6 +3680,7 @@ export default function CardLedger() {
         .checklist-info-card { max-width: 380px; }
         .checklist-info-note { font-size: 13px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
         .checklist-auto-tag { font-size: 10.5px; color: var(--green); border: 1px solid var(--green); border-radius: 10px; padding: 1px 7px; flex-shrink: 0; }
+        .checklist-series-tag { font-size: 10.5px; color: var(--muted); border: 1px solid var(--paper-line); border-radius: 10px; padding: 1px 7px; flex-shrink: 0; white-space: nowrap; }
         .checklist-alumni-heading { margin: 28px 0 4px; font-size: 16px; }
         .checklist-row-team { font-size: 11.5px; flex-shrink: 0; }
         .checklist-empty { font-size: 13px; color: var(--muted); padding: 6px 0; margin: 0; }
@@ -3858,7 +3992,8 @@ export default function CardLedger() {
               Every Dallas Stars / Minnesota North Stars Upper Deck <strong>Young Guns</strong> rookie card, pulled out of the full Stars Checklist above and sourced the same way from the{" "}
               <a href="https://www.tcdb.com" target="_blank" rel="noreferrer">Trading Card Database</a>. Young Guns is Upper Deck's marquee rookie subset, numbered at the tail of each
               series (roughly #201–250 and #451–500 in a standard 500-card year, with a third high-number block added from 2020-21 on) — this list is just those specific cards. Owned/collected
-              status stays in sync with the main checklist automatically.
+              status stays in sync with the main checklist automatically. Each card shows which specific series/wave (Series 1, Series 2, Extended Series, etc.) it actually shipped in — that's
+              what tells you which packs have a chance of containing it.
             </p>
             {youngGunsProgress.perSet.length === 0 ? (
               <p className="checklist-empty">No Young Guns identified yet.</p>
@@ -3877,6 +4012,7 @@ export default function CardLedger() {
                   onOpenInfo={setChecklistInfoEntry}
                   onToggleManual={toggleManualOwned}
                   labelSuffix="Young Guns"
+                  showSeries
                 />
               ))
             )}
@@ -3908,6 +4044,7 @@ export default function CardLedger() {
                   onToggleManual={toggleManualOwned}
                   labelSuffix="Young Guns"
                   mixedTeams
+                  showSeries
                 />
               ))
             )}
