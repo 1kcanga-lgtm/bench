@@ -430,7 +430,7 @@ async function rotateForStorage(item, parsed) {
 }
 
 module.exports = function registerBulkImport(app, db, opts) {
-  const { importRoot, getApiKey, anthropicVersion } = opts;
+  const { importRoot, getApiKey, anthropicVersion, savePhotoFile } = opts;
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS bulk_jobs (
@@ -504,6 +504,12 @@ module.exports = function registerBulkImport(app, db, opts) {
   const listReview = db.prepare(`SELECT * FROM bulk_review_items WHERE status='pending' ORDER BY created_at ASC`);
   const getReview = db.prepare(`SELECT * FROM bulk_review_items WHERE id=?`);
   const setReviewStatus = db.prepare(`UPDATE bulk_review_items SET status=? WHERE id=?`);
+  // Once a job item's or review item's photo bytes have been copied out to a file (on save) or
+  // are no longer needed (on discard), null these out -- otherwise they sit here forever as
+  // orphaned duplicate base64, which is exactly what happened before this migration (~241MB of
+  // dead weight across these two tables in production).
+  const clearItemPhotos = db.prepare(`UPDATE bulk_job_items SET front_api=NULL, back_api=NULL, front_storage=NULL, back_storage=NULL WHERE id=?`);
+  const clearReviewPhotos = db.prepare(`UPDATE bulk_review_items SET front_storage=NULL, back_storage=NULL WHERE id=?`);
   const getStorageStmt = db.prepare("SELECT value FROM kv WHERE key = ?");
   const setStorageStmt = db.prepare(
     `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
@@ -648,14 +654,18 @@ module.exports = function registerBulkImport(app, db, opts) {
 
   // Save a reviewed item (Kaleb has edited/confirmed the fields client-side) straight into the
   // ledger, then mark the review row resolved.
-  app.post("/api/bulk-import/review/:id/save", (req, res) => {
+  app.post("/api/bulk-import/review/:id/save", async (req, res) => {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     const form = req.body || {};
+    const player = String(form.player || "").trim();
+    if (!player) return res.status(400).json({ error: { message: "Player name is required." } });
+    const frontUrl = row.front_storage ? await savePhotoFile(row.front_storage, null) : null;
+    const backUrl = row.back_storage ? await savePhotoFile(row.back_storage, null) : null;
     const entry = {
       id: crypto.randomUUID(),
       dateAdded: Date.now(),
-      player: String(form.player || "").trim(),
+      player,
       team: String(form.team || "").trim(),
       sport: SPORTS.includes(form.sport) ? form.sport : "Other",
       year: String(form.year || "").trim(),
@@ -665,16 +675,16 @@ module.exports = function registerBulkImport(app, db, opts) {
       value: form.value === "" || form.value === null || form.value === undefined || isNaN(Number(form.value)) ? null : Number(form.value),
       onlineFrontUrl: form.onlineFrontUrl || null,
       onlineBackUrl: form.onlineBackUrl || null,
-      personalFront: row.front_storage || null,
-      personalBack: row.back_storage || null,
+      personalFront: frontUrl,
+      personalBack: backUrl,
       purchasePhotoFront: null,
       purchasePhotoBack: null,
       thumbnailSource: "personal",
       bulkAutoImport: true,
     };
-    if (!entry.player) return res.status(400).json({ error: { message: "Player name is required." } });
     appendCardsToLedger([entry]);
     setReviewStatus.run("resolved", row.id);
+    clearReviewPhotos.run(row.id);
     res.json({ ok: true });
   });
 
@@ -682,6 +692,7 @@ module.exports = function registerBulkImport(app, db, opts) {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     setReviewStatus.run("discarded", row.id);
+    clearReviewPhotos.run(row.id);
     res.json({ ok: true });
   });
 
@@ -729,14 +740,17 @@ module.exports = function registerBulkImport(app, db, opts) {
       return { toReview: true, saved: false };
     }
     const rotated = await rotateForStorage(item, parsed);
+    const frontUrl = await savePhotoFile(rotated.front, null);
+    const backUrl = rotated.back ? await savePhotoFile(rotated.back, null) : null;
     const entry = buildCardEntry(
       { ...item, front_is_phone: rotated.frontIsPhoneOverride, back_is_phone: rotated.backIsPhoneOverride },
       parsed,
-      rotated.front,
-      rotated.back
+      frontUrl,
+      backUrl
     );
     appendCardsToLedger([entry]);
     setItemStatus.run("saved", item.id);
+    clearItemPhotos.run(item.id);
     return { toReview: false, saved: true };
   }
 

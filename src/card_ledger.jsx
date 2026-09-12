@@ -608,6 +608,36 @@ function rotateDataUrl(dataUrl, degrees) {
   });
 }
 
+const PHOTO_FIELDS = ["personalFront", "personalBack", "purchasePhotoFront", "purchasePhotoBack"];
+
+// Card photos are saved as raw JPEG files on the server rather than embedded as base64 in the
+// card JSON (see server.js's /api/photos route) -- this uploads one photo and returns the URL to
+// store on the card in its place. Passing the field's previous value as `previousUrl` lets a
+// rotate/replace overwrite the same file in place instead of leaving the old one orphaned on disk.
+async function uploadPhoto(dataUrl, previousUrl) {
+  const res = await fetch("/api/photos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dataUrl, previousUrl: previousUrl || null }),
+  });
+  if (!res.ok) throw new Error("photo upload failed");
+  const data = await res.json();
+  return data.url;
+}
+
+// Called once, right before a card is actually persisted. Only fields that are still a fresh
+// data: URL (i.e. changed during this edit -- swap/thumbnailSource-only edits never produce one)
+// get uploaded; anything already a /photos/... URL (untouched this edit) passes through as-is.
+async function resolvePhotoFields(fields, previousCard) {
+  const out = { ...fields };
+  for (const key of PHOTO_FIELDS) {
+    if (typeof out[key] === "string" && out[key].startsWith("data:")) {
+      out[key] = await uploadPhoto(out[key], previousCard ? previousCard[key] : null);
+    }
+  }
+  return out;
+}
+
 // --- Watched scan folder: a directory handle (from the File System Access API) can't be
 // JSON-stringified, so it's kept in IndexedDB rather than window.storage. Every call here is
 // wrapped by the caller in a feature check (window.showDirectoryPicker + indexedDB both present)
@@ -1797,6 +1827,15 @@ function BulkAddPanel({ onAddCard, onGoToGallery }) {
       setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, saveError: "Add a player name before saving." } : it)));
       return;
     }
+    const photos = await resolvePhotoFields(
+      {
+        personalFront: item.form.personalFront || null,
+        personalBack: item.form.personalBack || null,
+        purchasePhotoFront: item.form.purchasePhotoFront || null,
+        purchasePhotoBack: item.form.purchasePhotoBack || null,
+      },
+      null
+    );
     const entry = {
       id: (Date.now() + Math.random()).toString(36),
       dateAdded: Date.now(),
@@ -1810,10 +1849,7 @@ function BulkAddPanel({ onAddCard, onGoToGallery }) {
       value: item.form.value === "" || isNaN(Number(item.form.value)) ? null : Number(item.form.value),
       onlineFrontUrl: item.form.onlineFrontUrl || null,
       onlineBackUrl: item.form.onlineBackUrl || null,
-      personalFront: item.form.personalFront || null,
-      personalBack: item.form.personalBack || null,
-      purchasePhotoFront: item.form.purchasePhotoFront || null,
-      purchasePhotoBack: item.form.purchasePhotoBack || null,
+      ...photos,
       thumbnailSource: item.form.thumbnailSource || "online",
     };
     await onAddCard(entry);
@@ -2876,6 +2912,7 @@ export default function CardLedger() {
       const current = card[scanKey] || card[purchaseKey];
       if (!current) return;
       const rotated = await rotateDataUrl(current, 90);
+      const uploaded = await uploadPhoto(rotated, current);
       // Functional update (not a plain `cards.map` off the outer closure) so rotating a second
       // card before the first one's state has re-rendered still lands on top of that first
       // rotation instead of silently reverting it -- the whole point of making this fast is
@@ -2883,7 +2920,7 @@ export default function CardLedger() {
       setCards((prevCards) => {
         const next = prevCards.map((c) =>
           c.id === cardId
-            ? { ...c, [scanKey]: c[scanKey] ? rotated : c[scanKey], [purchaseKey]: c[purchaseKey] ? rotated : c[purchaseKey] }
+            ? { ...c, [scanKey]: c[scanKey] ? uploaded : c[scanKey], [purchaseKey]: c[purchaseKey] ? uploaded : c[purchaseKey] }
             : c
         );
         scheduleRotateSave(next);
@@ -3382,16 +3419,26 @@ export default function CardLedger() {
 
   const [formError, setFormError] = useState(null);
 
-  function saveCard() {
+  async function saveCard() {
     if (!form.player.trim()) {
       setFormError("Add a player name before saving — this is the one field that can't be blank.");
       return;
     }
     try {
       setFormError(null);
+      const previousCard = editingId ? cards.find((c) => c.id === editingId) : null;
+      const photos = await resolvePhotoFields(
+        {
+          personalFront: form.personalFront || null,
+          personalBack: form.personalBack || null,
+          purchasePhotoFront: form.purchasePhotoFront || null,
+          purchasePhotoBack: form.purchasePhotoBack || null,
+        },
+        previousCard
+      );
       const entry = {
         id: editingId ?? (Date.now() + Math.random()).toString(36),
-        dateAdded: editingId ? (cards.find((c) => c.id === editingId)?.dateAdded ?? Date.now()) : Date.now(),
+        dateAdded: editingId ? (previousCard?.dateAdded ?? Date.now()) : Date.now(),
         player: form.player.trim(),
         team: form.team.trim(),
         sport: form.sport,
@@ -3402,10 +3449,7 @@ export default function CardLedger() {
         value: form.value === "" || form.value === null || form.value === undefined || isNaN(Number(form.value)) ? null : Number(form.value),
         onlineFrontUrl: form.onlineFrontUrl || null,
         onlineBackUrl: form.onlineBackUrl || null,
-        personalFront: form.personalFront || null,
-        personalBack: form.personalBack || null,
-        purchasePhotoFront: form.purchasePhotoFront || null,
-        purchasePhotoBack: form.purchasePhotoBack || null,
+        ...photos,
         thumbnailSource: form.thumbnailSource || "online",
       };
       const next = editingId ? cards.map((c) => (c.id === editingId ? entry : c)) : [...cards, entry];
@@ -3503,10 +3547,11 @@ export default function CardLedger() {
     const current = detailCard[scanKey] || detailCard[purchaseKey];
     if (!current) return;
     const rotated = await rotateDataUrl(current, 90);
+    const uploaded = await uploadPhoto(rotated, current);
     const updated = {
       ...detailCard,
-      [scanKey]: detailCard[scanKey] ? rotated : detailCard[scanKey],
-      [purchaseKey]: detailCard[purchaseKey] ? rotated : detailCard[purchaseKey],
+      [scanKey]: detailCard[scanKey] ? uploaded : detailCard[scanKey],
+      [purchaseKey]: detailCard[purchaseKey] ? uploaded : detailCard[purchaseKey],
     };
     persist(cards.map((c) => (c.id === detailCard.id ? updated : c)));
     setDetailCard(updated);
