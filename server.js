@@ -11,6 +11,7 @@
 
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const express = require("express");
 const Database = require("better-sqlite3");
 
@@ -26,6 +27,29 @@ const IMPORT_ROOT = path.resolve(process.env.IMPORT_ROOT || "/data/import");
 fs.mkdirSync(IMPORT_ROOT, { recursive: true });
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+// Card photo files live alongside card-ledger.db, so they're covered by the same bind mount
+// (and therefore the same backup coverage) with zero docker-compose changes.
+const PHOTOS_DIR = path.join(path.dirname(DB_PATH), "photos");
+fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
+// Inlined rather than required from a separate photo-store.js module: only server.js,
+// bulk-import.js, and public/ are live-mounted into the container (see docker-compose.yml) --
+// an extra standalone file has no deploy path without an image rebuild, so this stays
+// self-contained here. (scripts/migrate-photos-to-files.js, run as a one-off outside the
+// container, still uses the standalone photo-store.js -- kept in sync by hand, small enough
+// that drift is easy to catch.)
+const PHOTO_URL_RE = /^\/photos\/([0-9a-f-]{36})\.jpg(?:\?.*)?$/;
+async function savePhotoFile(dataUrl, previousUrl) {
+  if (!dataUrl) return null;
+  const match = /^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/s.exec(dataUrl);
+  if (!match) throw new Error("savePhotoFile expected a data:image/... base64 URL");
+  const reuseMatch = typeof previousUrl === "string" ? PHOTO_URL_RE.exec(previousUrl) : null;
+  const id = reuseMatch ? reuseMatch[1] : crypto.randomUUID();
+  const buffer = Buffer.from(match[1], "base64");
+  await fs.promises.writeFile(path.join(PHOTOS_DIR, `${id}.jpg`), buffer);
+  return `/photos/${id}.jpg?v=${Date.now()}`;
+}
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
@@ -66,6 +90,24 @@ app.put("/api/storage/:key", (req, res) => {
   res.json({ ok: true });
 });
 
+// --- photo file storage ------------------------------------------------------------------
+// Card photos are saved as raw JPEG files (see photo-store.js) instead of being embedded as
+// base64 inside the card JSON -- keeps ordinary collection saves small and lets photos be
+// lazy-loaded/cached by the browser instead of round-tripping on every save.
+app.post("/api/photos", async (req, res) => {
+  const dataUrl = req.body && typeof req.body.dataUrl === "string" ? req.body.dataUrl : null;
+  const previousUrl = req.body && typeof req.body.previousUrl === "string" ? req.body.previousUrl : null;
+  if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+    return res.status(400).json({ error: { message: "Expected a data:image/... base64 URL." } });
+  }
+  try {
+    const url = await savePhotoFile(dataUrl, previousUrl);
+    res.json({ url });
+  } catch (err) {
+    res.status(400).json({ error: { message: String((err && err.message) || err) } });
+  }
+});
+
 // --- Anthropic proxy ---------------------------------------------------------------------
 app.post("/api/anthropic/messages", async (req, res) => {
   if (!ANTHROPIC_API_KEY) {
@@ -102,10 +144,15 @@ require("./bulk-import")(app, db, {
   importRoot: IMPORT_ROOT,
   getApiKey: () => ANTHROPIC_API_KEY,
   anthropicVersion: ANTHROPIC_VERSION,
+  savePhotoFile,
 });
 
 // --- static frontend -----------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, "public")));
+// Photo files, served straight off disk. Every URL points at an immutable uuid+cache-buster
+// (see photo-store.js), so a long max-age is safe -- a rotate/replace mints a new ?v= rather
+// than reusing a cached one.
+app.use("/photos", express.static(PHOTOS_DIR, { maxAge: "365d" }));
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
