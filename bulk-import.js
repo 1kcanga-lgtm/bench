@@ -215,6 +215,22 @@ async function resizeToDataUrl(filePath, maxDim, quality) {
   return `data:image/jpeg;base64,${buf.toString("base64")}`;
 }
 
+// Resizes a data-URL image already in memory (as opposed to resizeToDataUrl above, which reads
+// from a file path) -- used when Kaleb uploads a replacement photo for a review item, to shrink
+// it down to the same size the identify API call normally gets (the browser-side upload path
+// already sends a 1280px "storage" copy; this produces the smaller 1024px "api" copy from it,
+// matching every other photo intake path in this app rather than sending the full 1280px version
+// to the model unnecessarily).
+async function resizeDataUrlNode(dataUrl, maxDim, quality) {
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const buf = Buffer.from(base64, "base64");
+  const out = await sharp(buf)
+    .resize({ width: maxDim, height: maxDim, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: Math.round(quality * 100) })
+    .toBuffer();
+  return `data:image/jpeg;base64,${out.toString("base64")}`;
+}
+
 async function rotateDataUrlNode(dataUrl, degrees) {
   const deg = Number(degrees) || 0;
   if (!deg) return dataUrl;
@@ -498,12 +514,24 @@ module.exports = function registerBulkImport(app, db, opts) {
   const setItemBatch = db.prepare(`UPDATE bulk_job_items SET status=?, batch_id=? WHERE id=?`);
   const setItemStatus = db.prepare(`UPDATE bulk_job_items SET status=? WHERE id=?`);
   const addItemCost = db.prepare(`UPDATE bulk_job_items SET cost_usd = cost_usd + ? WHERE id=?`);
+  // Used by the review queue's "Replace photo" control (a stray/missing photo earlier in a
+  // >2-image folder shifts every pairing after it -- see groupToItems above -- so sometimes the
+  // fix isn't "these two are swapped," it's "one of these is a photo of a completely different
+  // card" and Kaleb has to supply the correct one himself).
+  const updateItemPhotos = db.prepare(
+    `UPDATE bulk_job_items SET front_storage=?, back_storage=?, front_api=?, back_api=? WHERE id=?`
+  );
   const insertReview = db.prepare(
     `INSERT INTO bulk_review_items (id, job_id, folder_name, front_storage, back_storage, guess_json, reason, status, created_at) VALUES (?,?,?,?,?,?,?, 'pending', ?)`
   );
   const listReview = db.prepare(`SELECT * FROM bulk_review_items WHERE status='pending' ORDER BY created_at ASC`);
   const getReview = db.prepare(`SELECT * FROM bulk_review_items WHERE id=?`);
   const setReviewStatus = db.prepare(`UPDATE bulk_review_items SET status=? WHERE id=?`);
+  // bulk_review_items doesn't carry a direct foreign key back to the bulk_job_items row it came
+  // from (it's a standalone snapshot -- see insertReview above), so "retry" below looks the
+  // original scan back up via (job_id, folder_name), which is unique within a job the same way
+  // it is everywhere else in this file.
+  const getJobItemByFolder = db.prepare(`SELECT * FROM bulk_job_items WHERE job_id=? AND folder_name=? LIMIT 1`);
   const getStorageStmt = db.prepare("SELECT value FROM kv WHERE key = ?");
   const setStorageStmt = db.prepare(
     `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
@@ -652,6 +680,10 @@ module.exports = function registerBulkImport(app, db, opts) {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     const form = req.body || {};
+    // frontImage/backImage are the client's fully-resolved choice of what to store -- already
+    // accounting for "Swap front/back" and/or "Replace photo" in the review card -- so this route
+    // just uses them directly rather than reinterpreting a flag. Falls back to whatever's already
+    // stored on this row if the client didn't send a replacement for one or either side.
     const entry = {
       id: crypto.randomUUID(),
       dateAdded: Date.now(),
@@ -665,8 +697,8 @@ module.exports = function registerBulkImport(app, db, opts) {
       value: form.value === "" || form.value === null || form.value === undefined || isNaN(Number(form.value)) ? null : Number(form.value),
       onlineFrontUrl: form.onlineFrontUrl || null,
       onlineBackUrl: form.onlineBackUrl || null,
-      personalFront: row.front_storage || null,
-      personalBack: row.back_storage || null,
+      personalFront: form.frontImage || row.front_storage || null,
+      personalBack: form.backImage || row.back_storage || null,
       purchasePhotoFront: null,
       purchasePhotoBack: null,
       thumbnailSource: "personal",
@@ -682,6 +714,57 @@ module.exports = function registerBulkImport(app, db, opts) {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     setReviewStatus.run("discarded", row.id);
+    res.json({ ok: true });
+  });
+
+  // Sends a review item back through identification instead of Kaleb typing in the fields by
+  // hand. Every item that reaches the review queue has already been through BOTH the cheap pass
+  // and the search-enabled pass once (see finalizeSucceeded/finalizeFailed above -- a failure or
+  // low-confidence result on pass 1 always escalates to pass 2 automatically, without ever
+  // touching the review queue), so this resubmits straight into the search-enabled pass rather
+  // than repeating the cheap one. That's a real second attempt, not a no-op: a plain API/network
+  // failure (reason "api_error") has a good chance of just succeeding this time, and even a
+  // genuine low-confidence read isn't perfectly deterministic between calls -- e.g. the model
+  // picking the wrong one of the two photos as the front the first time doesn't mean it will
+  // again. This is NOT instant -- it goes back through the same 45-second-tick + Batch API
+  // pipeline as the original import, so it can take anywhere from a couple minutes to longer,
+  // same as the first pass did.
+  app.post("/api/bulk-import/review/:id/retry", async (req, res) => {
+    const row = getReview.get(req.params.id);
+    if (!row) return res.status(404).json({ error: { message: "review item not found" } });
+    const jobItem = getJobItemByFolder.get(row.job_id, row.folder_name);
+    if (!jobItem) {
+      return res.status(409).json({
+        error: {
+          message:
+            "Couldn't find the original scan for this one to resubmit (its job record may be gone). Fill in the fields by hand and save, or discard it.",
+        },
+      });
+    }
+    // frontImage/backImage are only present when Kaleb used "Swap front/back" and/or "Replace
+    // photo" before retrying -- most commonly to fix a folder where a stray/missing photo earlier
+    // on shifted every pairing after it, landing the front of one card next to the back of a
+    // completely different one (see groupToItems above). Update BOTH the full-resolution storage
+    // copy and the smaller copy actually sent to the API, so the corrected pair -- not the
+    // original bad one -- is what gets re-identified.
+    if (req.body && (req.body.frontImage || req.body.backImage)) {
+      try {
+        const newFrontStorage = req.body.frontImage || jobItem.front_storage;
+        const newBackStorage = req.body.backImage || jobItem.back_storage;
+        const newFrontApi = req.body.frontImage ? await resizeDataUrlNode(req.body.frontImage, 1024, 0.85) : jobItem.front_api;
+        const newBackApi = req.body.backImage ? await resizeDataUrlNode(req.body.backImage, 1024, 0.85) : jobItem.back_api;
+        updateItemPhotos.run(newFrontStorage, newBackStorage, newFrontApi, newBackApi, jobItem.id);
+      } catch (e) {
+        return res.status(500).json({ error: { message: "Couldn't process the replacement photo: " + ((e && e.message) || e) } });
+      }
+    }
+    setItemStatus.run("pending_pass2", jobItem.id);
+    bumpJobCounts.run(0, -1, 0, new Date().toISOString(), row.job_id);
+    // The job may already be marked "done" if this was its last outstanding item -- put it back
+    // to "processing" so the background tick loop (tickAllJobs, below) actually picks it up again
+    // instead of it sitting untouched forever.
+    updateJobStatus.run("processing", new Date().toISOString(), row.job_id);
+    setReviewStatus.run("retried", row.id);
     res.json({ ok: true });
   });
 

@@ -4,13 +4,58 @@ const SPORTS = ["Baseball", "Basketball", "Football", "Hockey", "Soccer", "Other
 // A starter list for the brand datalist -- just suggestions, any brand can still be typed
 // freehand. Combined at render time with whatever brands already appear in the collection.
 const KNOWN_BRANDS = ["Upper Deck", "Topps", "O-Pee-Chee", "Panini", "Score", "Leaf", "Parkhurst", "In The Game", "SP Authentic", "Ultimate Collection", "Black Diamond"];
+
+// Round 21: team-color theming for the Collection tab, applied only when a team filter is
+// active (Kaleb's choice -- not an app-wide re-theme). Colors are each team's own on-ice/branding
+// identity from general hockey knowledge, not pulled from any licensed asset -- this app never
+// stores or displays an actual team logo/wordmark, just a color wash + CSS motifs, so there's
+// nothing here that reproduces a trademarked mark. Covers every team name that appears anywhere
+// in this file's own checklist/alumni data (guaranteed to be selectable in the team filter once
+// Kaleb owns a matching card) plus a handful of other common Upper Deck-era teams a random pack
+// pull could turn up. A team not in this table just keeps the app's normal default look --
+// extend this table with a real {primary, accent, ink} triplet if a themed team ever feels flat.
+const TEAM_THEMES = {
+  "Dallas Stars": { primary: "#006847", accent: "#8A8D8F", ink: "#0B1210" },
+  "Minnesota North Stars": { primary: "#154734", accent: "#FFC72C", ink: "#0B1210" },
+  "Minnesota Wild": { primary: "#154734", accent: "#A6192E", ink: "#0B1210" },
+  "Quebec Nordiques": { primary: "#1E5B94", accent: "#C8102E", ink: "#0C1720" },
+  "Buffalo Sabres": { primary: "#002654", accent: "#FCB514", ink: "#0A0F1A" },
+  "Florida Panthers": { primary: "#041E42", accent: "#C8102E", ink: "#080D16" },
+  "Atlanta Thrashers": { primary: "#041E42", accent: "#5B9BD5", ink: "#080D16" },
+  "Ottawa Senators": { primary: "#C52032", accent: "#C69214", ink: "#160406" },
+  "Anaheim Ducks": { primary: "#111111", accent: "#F47A38", ink: "#050505" },
+  "Boston Bruins": { primary: "#111111", accent: "#FFB81C", ink: "#050505" },
+  "Colorado Avalanche": { primary: "#6F263D", accent: "#236192", ink: "#160A0D" },
+  "Columbus Blue Jackets": { primary: "#002654", accent: "#CE1126", ink: "#0A0F1A" },
+  "Nashville Predators": { primary: "#041E42", accent: "#FFB81C", ink: "#080D16" },
+  "New Jersey Devils": { primary: "#C8102E", accent: "#111111", ink: "#160406" },
+  "New York Rangers": { primary: "#0038A8", accent: "#CE1126", ink: "#080E1D" },
+  "Phoenix Coyotes": { primary: "#8C2633", accent: "#E2D6B5", ink: "#160809" },
+  "San Jose Sharks": { primary: "#006D75", accent: "#EA7200", ink: "#04191B" },
+  "Washington Capitals": { primary: "#041E42", accent: "#C8102E", ink: "#080D16" },
+  "Chicago Blackhawks": { primary: "#CF0A2C", accent: "#FF671B", ink: "#170305" },
+  "Detroit Red Wings": { primary: "#CE1126", accent: "#FFFFFF", ink: "#170406" },
+  "Edmonton Oilers": { primary: "#041E42", accent: "#FF4C00", ink: "#080D16" },
+  "Montreal Canadiens": { primary: "#AF1E2D", accent: "#192168", ink: "#160406" },
+  "Pittsburgh Penguins": { primary: "#111111", accent: "#FCB514", ink: "#050505" },
+  "St. Louis Blues": { primary: "#002F87", accent: "#FCB514", ink: "#060E1D" },
+  "Toronto Maple Leafs": { primary: "#00205B", accent: "#FFFFFF", ink: "#050A15" },
+  "Vancouver Canucks": { primary: "#00205B", accent: "#00843D", ink: "#050A15" },
+  "Vegas Golden Knights": { primary: "#333F42", accent: "#B4975A", ink: "#0C0E0F" },
+  "Winnipeg Jets": { primary: "#041E42", accent: "#7B303E", ink: "#080D16" },
+  "Carolina Hurricanes": { primary: "#CE1126", accent: "#111111", ink: "#170406" },
+  "Calgary Flames": { primary: "#C8102E", accent: "#FAAF19", ink: "#160406" },
+  "Tampa Bay Lightning": { primary: "#00205B", accent: "#FFFFFF", ink: "#050A15" },
+  "Los Angeles Kings": { primary: "#111111", accent: "#A2AAAD", ink: "#050505" },
+  "Philadelphia Flyers": { primary: "#F74902", accent: "#111111", ink: "#170703" },
+  "New York Islanders": { primary: "#00539B", accent: "#F47D30", ink: "#050D1A" },
+  "Seattle Kraken": { primary: "#001628", accent: "#99D9D9", ink: "#020508" },
+  "Utah Hockey Club": { primary: "#69B3E7", accent: "#010101", ink: "#04121D" },
+};
+
 const STORAGE_KEY = "card-ledger-entries";
 
 const CHECKLIST_MANUAL_KEY = "card-ledger-checklist-manual";
-// Bulk Add's in-progress queue (pairing/identify results, review status) -- persisted so a batch
-// survives switching tabs, closing the app, or coming back the next day, instead of only living
-// in memory for as long as the Bulk Add tab happens to stay mounted.
-const BULK_QUEUE_KEY = "card-ledger-bulk-queue";
 // Filenames already seen in a watched scan folder, so re-checking it only turns up genuinely new
 // scans rather than re-queuing everything in the folder every time.
 const WATCH_SEEN_KEY = "card-ledger-watch-seen-files";
@@ -1246,7 +1291,7 @@ function ChecklistYearSection({
                     {entry.p}
                   </button>
                   {mixedTeams && <span className="checklist-year-team checklist-row-team">{entry.team}</span>}
-                  {series && <span className="checklist-series-tag" title="Which pack wave/series this card actually shipped in">{series}</span>}
+                  {series && <span className="checklist-series-tag" title="Which pack wave/series this card actually shipped in">{set.year} {series}</span>}
                   {auto && <span className="checklist-auto-tag">in ledger</span>}
                 </div>
               );
@@ -1269,928 +1314,6 @@ function CardImage({ src, alt, fallbackLabel }) {
     );
   }
   return <img src={src} alt={alt} onError={() => setErrored(true)} />;
-}
-
-function naturalFilenameSort(a, b) {
-  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-}
-
-// --- Bulk Add: a folder (or multi-select) of scans, paired front/back in the order they
-// were chosen, identified in a batch, then reviewed and confirmed one at a time. ---
-function BulkAddPanel({ onAddCard, onGoToGallery }) {
-  const [stage, setStage] = useState("select"); // select | pairing | identifying | review | done
-  const [queue, setQueue] = useState([]);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [reviewIndex, setReviewIndex] = useState(0);
-  const [savedCount, setSavedCount] = useState(0);
-  const [matchedCount, setMatchedCount] = useState(0);
-  const [skippedCount, setSkippedCount] = useState(0);
-  const [zoomSrc, setZoomSrc] = useState(null);
-  const [restoredFromStorage, setRestoredFromStorage] = useState(false);
-  // Lifetime estimated API spend across every identify/appraise/price-lookup call ever made,
-  // refreshed whenever this screen is showing "select" (i.e. right before Kaleb starts a new
-  // batch, and right after one finishes) -- not live-updated mid-batch, since the running total
-  // for the batch actually in progress is shown separately (batchCostUsd below, from the queue
-  // itself).
-  const [lifetimeUsage, setLifetimeUsage] = useState(null);
-
-  const watchSupported = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function" && typeof indexedDB !== "undefined";
-  const [watchFolderName, setWatchFolderName] = useState(null);
-  const [watchStatus, setWatchStatus] = useState("idle"); // idle | checking | needs-permission | error
-  const [watchMessage, setWatchMessage] = useState(null);
-
-  // Refreshed every time this screen shows "select" -- i.e. on first load, and again whenever a
-  // batch finishes and Kaleb lands back here to start another one -- so the lifetime total shown
-  // there reflects whatever was just spent without needing a full page reload.
-  useEffect(() => {
-    if (stage !== "select") return;
-    (async () => {
-      try {
-        const saved = await window.storage.get(USAGE_LOG_KEY, false);
-        setLifetimeUsage(saved && saved.value ? JSON.parse(saved.value) : { totalCostUsd: 0, totalCalls: 0 });
-      } catch (e) {
-        // best-effort only
-      }
-    })();
-  }, [stage]);
-
-  // On mount: first restore any in-progress batch from a previous visit (so switching tabs, or
-  // closing and reopening the app, doesn't lose review progress); only if nothing was in
-  // progress do we check a connected watch folder for new scans dropped in since last time.
-  useEffect(() => {
-    (async () => {
-      let hadInProgressBatch = false;
-      try {
-        const saved = await window.storage.get(BULK_QUEUE_KEY, false);
-        if (saved && saved.value) {
-          const items = JSON.parse(saved.value);
-          if (Array.isArray(items) && items.length > 0) {
-            const incompleteExists = items.some((it) => it.status !== "saved" && it.status !== "skipped");
-            if (incompleteExists) {
-              // an item stuck mid-"retrying" from an interrupted session can't still be in
-              // flight -- treat it as a normal error so it's clearly actionable again
-              const cleaned = items.map((it) => (it.status === "retrying" ? { ...it, status: "error" } : it));
-              setQueue(cleaned);
-              setSavedCount(cleaned.filter((it) => it.status === "saved").length);
-              setSkippedCount(cleaned.filter((it) => it.status === "skipped").length);
-              setRestoredFromStorage(true);
-              const stillPending = cleaned.some((it) => it.status === "pending");
-              if (stillPending) {
-                // The batch never finished its first identify pass -- most likely the tab
-                // crashed, was closed, or ran out of memory partway through. Resume by
-                // identifying just the cards that never got a result; cards that already
-                // succeeded or failed are left exactly as they are, so nothing already
-                // identified (and paid for) gets thrown away or billed again.
-                runBulkIdentifyItems(cleaned);
-              } else {
-                setStage("review");
-                const firstOpen = cleaned.findIndex((it) => it.status !== "saved" && it.status !== "skipped");
-                setReviewIndex(firstOpen === -1 ? 0 : firstOpen);
-              }
-              hadInProgressBatch = true;
-            } else {
-              // a leftover fully-finished batch nobody cleared with "Start another batch" --
-              // no reason to keep carrying it around
-              await window.storage.set(BULK_QUEUE_KEY, "", false).catch(() => {});
-            }
-          }
-        }
-      } catch (e) {
-        // best-effort restore; worst case the user just starts a fresh batch
-      }
-
-      if (hadInProgressBatch || !watchSupported) return;
-      try {
-        const handle = await loadWatchHandle();
-        if (!handle) return;
-        setWatchFolderName(handle.name);
-        const perm = await handle.queryPermission({ mode: "read" });
-        if (perm === "granted") {
-          checkWatchedFolder(handle);
-        } else {
-          setWatchStatus("needs-permission");
-        }
-      } catch (e) {
-        // a stale/revoked handle just means the watch card won't auto-check -- not fatal
-      }
-    })();
-    // eslint-disable-next-line
-  }, []);
-
-  // Persist the queue during identification too, not just once it reaches review/done. Each
-  // identify call costs real API usage -- previously, a crashed tab or a big batch getting
-  // interrupted partway through meant every card identified successfully up to that point (and
-  // paid for) was simply thrown away, because nothing was saved until the *entire* batch
-  // finished. This fires once per completed card (each identify call takes several seconds
-  // thanks to web_search, so this isn't a hot loop) -- the resume logic on mount above picks up
-  // any cards still left at "pending" from exactly where an interrupted batch left off, without
-  // re-identifying (and re-paying for) cards that already got a result.
-  useEffect(() => {
-    if (stage !== "identifying" && stage !== "review" && stage !== "done") return;
-    const toSave = queue.length ? JSON.stringify(queue) : "";
-    window.storage.set(BULK_QUEUE_KEY, toSave, false).catch(() => {});
-  }, [queue, stage]);
-
-  async function connectWatchFolder() {
-    setWatchStatus("connecting");
-    setWatchMessage(null);
-    try {
-      const handle = await window.showDirectoryPicker({ mode: "read" });
-      await saveWatchHandle(handle);
-      setWatchFolderName(handle.name);
-      setWatchStatus("idle");
-      setWatchMessage(null);
-      // Treat whatever's already sitting in the folder as "already seen" -- connecting a folder
-      // should only start noticing NEW scans from here on, not immediately queue everything
-      // that happens to already be in there.
-      const existing = [];
-      for await (const entry of handle.values()) {
-        if (entry.kind === "file" && /\.(jpe?g|jpg|png|webp)$/i.test(entry.name)) existing.push(entry.name);
-      }
-      await window.storage.set(WATCH_SEEN_KEY, JSON.stringify(existing), false);
-    } catch (e) {
-      // A cancelled picker throws AbortError -- that's the user changing their mind, not a
-      // problem, so stay quiet. Anything else (SecurityError from a locked-down context,
-      // NotAllowedError, or any other failure) gets surfaced for real instead of vanishing
-      // silently, which is what made this button look broken before.
-      if (e && e.name === "AbortError") {
-        setWatchStatus("idle");
-        return;
-      }
-      setWatchStatus("error");
-      setWatchMessage(
-        e && e.name === "SecurityError"
-          ? "This app can't open a folder picker in this window (blocked for security reasons). Watch folders need a regular top-level browser tab."
-          : `Couldn't open the folder picker${e && e.message ? ` (${e.message})` : ""}.`
-      );
-    }
-  }
-
-  async function reconnectWatchFolder() {
-    try {
-      const handle = await loadWatchHandle();
-      if (!handle) return connectWatchFolder();
-      const perm = await handle.requestPermission({ mode: "read" });
-      if (perm === "granted") {
-        checkWatchedFolder(handle);
-      } else {
-        setWatchStatus("needs-permission");
-      }
-    } catch (e) {
-      setWatchStatus("error");
-      setWatchMessage(`Couldn't reconnect to the watched folder${e && e.message ? ` (${e.message})` : ""}.`);
-    }
-  }
-
-  async function disconnectWatchFolder() {
-    try {
-      await clearWatchHandle();
-    } catch (e) {
-      // ignore
-    }
-    setWatchFolderName(null);
-    setWatchStatus("idle");
-    setWatchMessage(null);
-  }
-
-  async function manualCheckWatchFolder() {
-    const handle = await loadWatchHandle().catch(() => null);
-    if (!handle) return;
-    const perm = await handle.queryPermission({ mode: "read" }).catch(() => "prompt");
-    if (perm === "granted") checkWatchedFolder(handle);
-    else reconnectWatchFolder();
-  }
-
-  // Scans the watched folder for files not in WATCH_SEEN_KEY yet, pairs and identifies them
-  // automatically (no manual pairing screen -- these are meant to be hands-off), and lands on
-  // the same review screen a manual batch would, ready to approve.
-  async function checkWatchedFolder(handle) {
-    setWatchStatus("checking");
-    try {
-      const seenRaw = await window.storage.get(WATCH_SEEN_KEY, false).catch(() => null);
-      const seen = new Set(seenRaw && seenRaw.value ? JSON.parse(seenRaw.value) : []);
-      const found = [];
-      for await (const entry of handle.values()) {
-        if (entry.kind !== "file") continue;
-        if (!/\.(jpe?g|jpg|png|webp)$/i.test(entry.name)) continue;
-        if (seen.has(entry.name)) continue;
-        found.push(entry);
-      }
-      found.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-      if (found.length === 0) {
-        setWatchStatus("idle");
-        setWatchMessage("No new scans in the watched folder.");
-        return;
-      }
-      const files = await Promise.all(found.map((h) => h.getFile()));
-      const nextSeen = new Set(seen);
-      files.forEach((f) => nextSeen.add(f.name));
-      await window.storage.set(WATCH_SEEN_KEY, JSON.stringify(Array.from(nextSeen)), false);
-      setWatchStatus("idle");
-      setWatchMessage(`Found ${files.length} new scan${files.length === 1 ? "" : "s"} -- identifying now.`);
-      const items = await pairFiles(files);
-      await runBulkIdentifyItems(items);
-    } catch (e) {
-      setWatchStatus("error");
-      setWatchMessage(
-        `Couldn't read the watched folder${e && e.message ? ` (${e.message})` : ""} -- try reconnecting it below.`
-      );
-    }
-  }
-
-  // Builds queue items from a set of files, converting each straight to data URLs (front/back
-  // thumbnail + a higher-res copy used both for AI identification and as the final saved image)
-  // and reading EXIF while the real File objects are still available. From this point on the
-  // queue is plain, storable data -- it no longer depends on the original File handles staying
-  // alive, which is what makes a batch resumable after a tab switch or a reload. Returns the
-  // final converted items (not just via setQueue) so a caller can chain straight into
-  // runBulkIdentifyItems without waiting on a React state update to land.
-  async function pairFiles(fileList) {
-    const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
-    files.sort(naturalFilenameSort);
-    if (files.length === 0) return [];
-    const rawPairs = [];
-    for (let i = 0; i < files.length; i += 2) {
-      rawPairs.push({ frontFile: files[i], backFile: files[i + 1] || null });
-    }
-    const skeleton = rawPairs.map((p, i) => ({
-      id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2)}`,
-      hasBack: !!p.backFile,
-      frontThumb: null,
-      backThumb: null,
-      frontMain: null,
-      backMain: null,
-      frontApi: null,
-      backApi: null,
-      frontIsPhone: false,
-      backIsPhone: false,
-      status: "pending",
-    }));
-    setQueue(skeleton);
-    const converted = await Promise.all(
-      rawPairs.map(async (p) => {
-        let frontThumb = null;
-        let backThumb = null;
-        let frontMain = null;
-        let backMain = null;
-        // Smaller, API-only copies used solely for AI identification -- kept separate from
-        // frontMain/backMain (which stay at full 1280px for permanent ledger storage) so cutting
-        // identify-call image tokens never degrades the quality of the saved card photos.
-        let frontApi = null;
-        let backApi = null;
-        let frontIsPhone = false;
-        let backIsPhone = false;
-        try {
-          frontThumb = await fileToResizedDataUrl(p.frontFile, 240, 0.7);
-          frontMain = await fileToResizedDataUrl(p.frontFile, 1280, 0.85);
-          frontApi = await fileToResizedDataUrl(p.frontFile, 1024, 0.85);
-          frontIsPhone = (await detectPhotoSource(p.frontFile)).isLikelyPhone;
-        } catch (e) {
-          // leave nulls -- identifyOneItem treats a missing front image as its own error
-        }
-        if (p.backFile) {
-          try {
-            backThumb = await fileToResizedDataUrl(p.backFile, 240, 0.7);
-            backMain = await fileToResizedDataUrl(p.backFile, 1280, 0.85);
-            backApi = await fileToResizedDataUrl(p.backFile, 1024, 0.85);
-            backIsPhone = (await detectPhotoSource(p.backFile)).isLikelyPhone;
-          } catch (e) {
-            // ditto for the back
-          }
-        }
-        return { frontThumb, backThumb, frontMain, backMain, frontApi, backApi, frontIsPhone, backIsPhone };
-      })
-    );
-    const finalItems = skeleton.map((item, idx) => ({ ...item, ...converted[idx] }));
-    setQueue(finalItems);
-    return finalItems;
-  }
-
-  async function handleFilesSelected(fileList) {
-    setStage("pairing");
-    await pairFiles(fileList);
-  }
-
-  function swapPair(id) {
-    setQueue((prev) =>
-      prev.map((p) =>
-        p.id === id
-          ? {
-              ...p,
-              frontThumb: p.backThumb,
-              backThumb: p.frontThumb,
-              frontMain: p.backMain,
-              backMain: p.frontMain,
-              frontApi: p.backApi,
-              backApi: p.frontApi,
-              frontIsPhone: p.backIsPhone,
-              backIsPhone: p.frontIsPhone,
-            }
-          : p
-      )
-    );
-  }
-
-  function removePair(id) {
-    setQueue((prev) => prev.filter((p) => p.id !== id));
-  }
-
-  // Identifies a single queue item and returns its updated form -- shared by the initial batch
-  // pass (runBulkIdentifyItems) and the per-card "Retry identification" button in review, so a
-  // card that failed the first time (a bad connection, a rate limit, an unusual team/year)
-  // doesn't require starting the whole batch over. Works entirely off the item's already-
-  // converted frontMain/backMain data URLs, not File objects, so a retry works fine even after
-  // a reload restored this item from storage.
-  function buildFailedItem(item, message, isBillingError, costUsd) {
-    return {
-      ...item,
-      status: "error",
-      error: message,
-      isBillingError: !!isBillingError,
-      costUsd: costUsd || 0,
-      form: {
-        player: "",
-        team: "",
-        sport: "Hockey",
-        year: "",
-        brand: "",
-        set: "",
-        cardNumber: "",
-        value: "",
-        onlineFrontUrl: null,
-        onlineBackUrl: null,
-        personalFront: item.frontIsPhone ? null : item.frontMain,
-        personalBack: item.backIsPhone ? null : item.backMain || null,
-        purchasePhotoFront: item.frontIsPhone ? item.frontMain : null,
-        purchasePhotoBack: item.backIsPhone ? item.backMain : null,
-        thumbnailSource: "personal",
-      },
-      phoneDetected: item.frontIsPhone || item.backIsPhone,
-    };
-  }
-
-  async function identifyOneItem(item) {
-    if (!item.frontMain) {
-      return buildFailedItem(item, "Missing image data for this card -- remove it and re-add the photo.", false, 0);
-    }
-    // apiUrls: smaller copies sent to the AI for identification only. storageUrls: the
-    // full-resolution copies that get rotated and saved as the card's permanent photos. Falls
-    // back to frontMain/backMain for frontApi/backApi so older in-progress queue items (paired
-    // before this split existed) still identify correctly.
-    const apiFront = item.frontApi || item.frontMain;
-    const apiBack = item.hasBack ? item.backApi || item.backMain : null;
-    const apiUrls = item.hasBack && apiBack ? [apiFront, apiBack] : [apiFront];
-    const storageUrls = item.hasBack && item.backMain ? [item.frontMain, item.backMain] : [item.frontMain];
-    try {
-      const result = await identifyCardFromImages(apiUrls);
-      let rotated = storageUrls;
-      try {
-        rotated =
-          storageUrls.length === 2
-            ? await Promise.all([
-                rotateDataUrl(storageUrls[0], Number(result.rotation1) || 0),
-                rotateDataUrl(storageUrls[1], Number(result.rotation2) || 0),
-              ])
-            : [await rotateDataUrl(storageUrls[0], Number(result.rotation) || 0)];
-      } catch (e) {
-        // keep un-rotated copies rather than failing the whole card
-      }
-      let front = rotated[0];
-      let back = rotated[1] || null;
-      let frontIsPhone = item.frontIsPhone;
-      let backIsPhone = item.backIsPhone;
-      if (rotated.length === 2 && Number(result.frontImageIndex) === 2) {
-        front = rotated[1];
-        back = rotated[0];
-        frontIsPhone = item.backIsPhone;
-        backIsPhone = item.frontIsPhone;
-      }
-      const cleanValueMatch =
-        result.estimatedValue !== null && result.estimatedValue !== undefined ? String(result.estimatedValue).match(/[\d.]+/) : null;
-      const form = {
-        player: result.player || "",
-        team: result.team || "",
-        sport: SPORTS.includes(result.sport) ? result.sport : "Other",
-        year: result.year ? String(result.year) : "",
-        brand: result.brand || "",
-        set: result.set || "",
-        cardNumber: result.cardNumber || "",
-        value: cleanValueMatch ? cleanValueMatch[0] : "",
-        onlineFrontUrl: result.frontImageUrl || null,
-        onlineBackUrl: result.backImageUrl || null,
-        personalFront: frontIsPhone ? null : front,
-        personalBack: backIsPhone ? null : back,
-        purchasePhotoFront: frontIsPhone ? front : null,
-        purchasePhotoBack: backIsPhone ? back : null,
-        thumbnailSource: (frontIsPhone || backIsPhone) && result.frontImageUrl ? "online" : "personal",
-      };
-      return {
-        ...item,
-        status: "ready",
-        error: null,
-        isBillingError: false,
-        costUsd: result._costUsd || 0,
-        searched: !!result._searched,
-        form,
-        confidence: result.confidence || null,
-        phoneDetected: frontIsPhone || backIsPhone,
-      };
-    } catch (err) {
-      return buildFailedItem(
-        item,
-        `Couldn't identify this one automatically${err && err.message ? ` (${err.message})` : ""} — check the photos, fill it in by hand, or try again.`,
-        err && err.isBilling,
-        err && err.costUsd
-      );
-    }
-  }
-
-  async function runBulkIdentifyItems(initialItems) {
-    setStage("identifying");
-    const items = [...initialItems];
-    setProgress({ done: 0, total: items.length });
-    let nextIndex = 0;
-    let doneCount = 0;
-    // Once any card comes back with an out-of-credit error, every other call in this batch would
-    // fail the exact same way -- no reason to make the person wait through dozens more doomed API
-    // calls one at a time. Remaining not-yet-attempted cards are marked failed immediately (same
-    // message, no network call), so the batch finishes right away with a clear reason on each.
-    let billingStopMessage = null;
-
-    async function worker() {
-      while (nextIndex < items.length) {
-        const idx = nextIndex++;
-        if (items[idx].status !== "pending") {
-          // already identified before an earlier interruption (crash, closed tab) -- this is a
-          // resumed batch, so don't re-identify (and re-pay for) cards that already finished.
-          doneCount++;
-          setProgress({ done: doneCount, total: items.length });
-          continue;
-        }
-        if (billingStopMessage) {
-          items[idx] = buildFailedItem(items[idx], billingStopMessage, true, 0);
-        } else {
-          items[idx] = await identifyOneItem(items[idx]);
-          if (items[idx].isBillingError) billingStopMessage = items[idx].error;
-        }
-        doneCount++;
-        setProgress({ done: doneCount, total: items.length });
-        setQueue([...items]);
-      }
-    }
-
-    // Kept modest -- a big batch (dozens of cards) hammering the API with more workers than
-    // this tends to trip a rate limit, which (before identifyCardFromImages retried) could fail
-    // an entire large batch outright.
-    const concurrency = Math.min(2, items.length);
-    await Promise.all(Array.from({ length: concurrency }, worker));
-    setStage("review");
-    setReviewIndex(0);
-  }
-
-  // Used by the pairing screen's "Identify N cards" button, which runs against whatever's
-  // currently in `queue` state (by that point pairing is done and the queue is settled).
-  function runBulkIdentify() {
-    return runBulkIdentifyItems(queue);
-  }
-
-  async function retryIdentify(idx) {
-    setQueue((prev) => prev.map((it, i) => (i === idx ? { ...it, status: "retrying" } : it)));
-    const target = queue[idx];
-    const updated = await identifyOneItem(target);
-    setQueue((prev) => prev.map((it, i) => (i === idx ? updated : it)));
-  }
-
-  function updateReviewForm(patch) {
-    setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, form: { ...it.form, ...patch } } : it)));
-  }
-
-  async function rotateReviewImage(face) {
-    const item = queue[reviewIndex];
-    if (!item || !item.form) return;
-    const scanKey = face === "front" ? "personalFront" : "personalBack";
-    const purchaseKey = face === "front" ? "purchasePhotoFront" : "purchasePhotoBack";
-    const current = item.form[scanKey] || item.form[purchaseKey];
-    if (!current) return;
-    const rotated = await rotateDataUrl(current, 90);
-    updateReviewForm({
-      [scanKey]: item.form[scanKey] ? rotated : item.form[scanKey],
-      [purchaseKey]: item.form[purchaseKey] ? rotated : item.form[purchaseKey],
-    });
-  }
-
-  function goNext() {
-    setReviewIndex((i) => {
-      if (i < queue.length - 1) return i + 1;
-      setStage("done");
-      return i;
-    });
-  }
-
-  function goPrev() {
-    setReviewIndex((i) => Math.max(0, i - 1));
-  }
-
-  async function saveCurrent() {
-    const item = queue[reviewIndex];
-    if (!item.form || !item.form.player.trim()) {
-      setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, saveError: "Add a player name before saving." } : it)));
-      return;
-    }
-    const entry = {
-      id: (Date.now() + Math.random()).toString(36),
-      dateAdded: Date.now(),
-      player: item.form.player.trim(),
-      team: item.form.team.trim(),
-      sport: item.form.sport,
-      year: item.form.year.trim(),
-      brand: item.form.brand.trim(),
-      set: item.form.set.trim(),
-      cardNumber: item.form.cardNumber.trim(),
-      value: item.form.value === "" || isNaN(Number(item.form.value)) ? null : Number(item.form.value),
-      onlineFrontUrl: item.form.onlineFrontUrl || null,
-      onlineBackUrl: item.form.onlineBackUrl || null,
-      personalFront: item.form.personalFront || null,
-      personalBack: item.form.personalBack || null,
-      purchasePhotoFront: item.form.purchasePhotoFront || null,
-      purchasePhotoBack: item.form.purchasePhotoBack || null,
-      thumbnailSource: item.form.thumbnailSource || "online",
-    };
-    await onAddCard(entry);
-    const hit = matchSingleCardToChecklist(entry);
-    setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, status: "saved", saveError: null } : it)));
-    setSavedCount((c) => c + 1);
-    if (hit) setMatchedCount((c) => c + 1);
-    goNext();
-  }
-
-  function skipCurrent() {
-    setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, status: "skipped" } : it)));
-    setSkippedCount((c) => c + 1);
-    goNext();
-  }
-
-  function restoreCurrent() {
-    setQueue((prev) => prev.map((it, i) => (i === reviewIndex ? { ...it, status: "ready" } : it)));
-  }
-
-  function resetBulk() {
-    setStage("select");
-    setQueue([]);
-    setProgress({ done: 0, total: 0 });
-    setReviewIndex(0);
-    setSavedCount(0);
-    setMatchedCount(0);
-    setSkippedCount(0);
-    setRestoredFromStorage(false);
-    window.storage.set(BULK_QUEUE_KEY, "", false).catch(() => {});
-  }
-
-  // Estimated cost of the batch currently in progress -- summed straight from the queue, since
-  // every identified (or failed-and-charged-for) item already carries its own costUsd.
-  const batchCostUsd = queue.reduce((sum, it) => sum + (it.costUsd || 0), 0);
-  // How many cards actually needed the paid, search-enabled second pass (vs. the free-er first
-  // pass alone) -- makes the two-pass system's savings visible per batch instead of only
-  // inferable from a single dollar total after the fact.
-  const searchedCount = queue.filter((it) => it.searched).length;
-  const identifiedCount = queue.filter((it) => it.status === "ready" || it.status === "saved" || it.status === "skipped" || (it.status === "error" && !it.isBillingError)).length;
-
-  return (
-    <div className="bulk-wrap">
-      {stage === "select" && (
-        <div className="bulk-select">
-          <p className="checklist-intro">
-            Pick a folder (or select multiple files) of card photos. I'll pair them up in the order you select them —
-            front, back, front, back — assuming that's the order they were scanned in. You'll get a chance to fix any
-            pairing before anything gets identified.
-          </p>
-          {lifetimeUsage && lifetimeUsage.totalCalls > 0 && (
-            <p className="checklist-intro" style={{ fontSize: 13, opacity: 0.75 }}>
-              Estimated lifetime API cost so far: ${lifetimeUsage.totalCostUsd.toFixed(2)} across {lifetimeUsage.totalCalls} call
-              {lifetimeUsage.totalCalls === 1 ? "" : "s"} (identify, appraise, and price lookups combined). This is an estimate
-              from each response's own usage numbers, not your actual bill -- check console.anthropic.com for that.
-            </p>
-          )}
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            webkitdirectory=""
-            id="bulk-folder-input"
-            style={{ display: "none" }}
-            onChange={(e) => handleFilesSelected(e.target.files)}
-          />
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            id="bulk-files-input"
-            style={{ display: "none" }}
-            onChange={(e) => handleFilesSelected(e.target.files)}
-          />
-          <div className="bulk-select-buttons">
-            <label htmlFor="bulk-folder-input" className="dropzone" style={{ flex: 1 }}>
-              Choose a folder
-            </label>
-            <label htmlFor="bulk-files-input" className="dropzone" style={{ flex: 1 }}>
-              Choose files
-            </label>
-          </div>
-
-          {watchSupported && (
-            <div className="watch-folder-box">
-              {watchFolderName ? (
-                <>
-                  <p className="checklist-intro" style={{ marginBottom: 8 }}>
-                    Watching <strong>{watchFolderName}</strong> for new scans — I check it automatically each time you open this tab.
-                    {watchMessage ? ` ${watchMessage}` : ""}
-                  </p>
-                  <div className="bulk-select-buttons">
-                    <button type="button" className="btn-secondary" onClick={manualCheckWatchFolder} disabled={watchStatus === "checking"}>
-                      {watchStatus === "checking" ? "Checking..." : "Check for new scans now"}
-                    </button>
-                    {watchStatus === "needs-permission" && (
-                      <button type="button" className="btn-secondary" onClick={reconnectWatchFolder}>
-                        Reconnect folder access
-                      </button>
-                    )}
-                    <button type="button" className="link-btn" onClick={disconnectWatchFolder}>
-                      Stop watching
-                    </button>
-                  </div>
-                  {watchStatus === "error" && <p className="identify-error">{watchMessage}</p>}
-                </>
-              ) : (
-                <>
-                  <p className="checklist-intro" style={{ marginBottom: 8 }}>
-                    Or connect a folder once, and I'll notice new scans dropped in there automatically each time you open the ledger —
-                    no need to pick files by hand.
-                  </p>
-                  <button type="button" className="btn-secondary" onClick={connectWatchFolder} disabled={watchStatus === "connecting"}>
-                    {watchStatus === "connecting" ? "Opening folder picker..." : "Watch a scan folder"}
-                  </button>
-                  {watchStatus === "error" && <p className="identify-error" style={{ marginTop: 8 }}>{watchMessage}</p>}
-                </>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {stage === "pairing" && (
-        <div className="bulk-pairing">
-          <p className="checklist-intro">
-            {queue.length} card{queue.length === 1 ? "" : "s"} detected from your selection. Make sure each pair below
-            actually belongs to the same card, and remove any stragglers — you don't need to worry about which image
-            is the front and which is the back, the identifier figures that out on its own from what's printed on
-            each side.
-          </p>
-          <div className="bulk-pairs-grid">
-            {queue.map((p, i) => (
-              <div className="bulk-pair" key={p.id}>
-                <span className="bulk-pair-index">#{i + 1}</span>
-                <div className="bulk-pair-thumbs">
-                  <CardImage src={p.frontThumb} alt="front" fallbackLabel="Loading..." />
-                  {p.hasBack ? (
-                    <CardImage src={p.backThumb} alt="back" fallbackLabel="Loading..." />
-                  ) : (
-                    <div className="bulk-pair-missing">no back</div>
-                  )}
-                </div>
-                <div className="bulk-pair-actions">
-                  {p.hasBack && (
-                    <button type="button" className="link-btn" onClick={() => swapPair(p.id)} title="Not required -- identification works either way. Only useful if identifying fails and you want to fix the order by hand.">
-                      Swap order
-                    </button>
-                  )}
-                  <button type="button" className="link-btn" onClick={() => removePair(p.id)}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="form-actions">
-            <button type="button" className="btn-secondary" onClick={() => setStage("select")}>
-              Start over
-            </button>
-            <button type="button" className="btn-primary" onClick={runBulkIdentify} disabled={queue.length === 0}>
-              Identify {queue.length} card{queue.length === 1 ? "" : "s"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {stage === "identifying" && (
-        <div className="bulk-identifying">
-          <p className="scan-status">
-            Identifying card {progress.done} of {progress.total}... a big batch can take a few minutes since each card gets its own lookup.
-          </p>
-          <div className="checklist-progress-bar" style={{ maxWidth: 320 }}>
-            <div className="checklist-progress-fill" style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
-          </div>
-          <p className="checklist-intro" style={{ fontSize: 13, opacity: 0.75, marginTop: 8 }}>
-            Est. cost so far this batch: ${batchCostUsd.toFixed(2)}
-            {identifiedCount > 0 && ` — ${searchedCount} of ${identifiedCount} needed a search lookup`}
-          </p>
-        </div>
-      )}
-
-      {stage === "review" &&
-        queue.length > 0 &&
-        (() => {
-          const item = queue[reviewIndex];
-          const form = item.form || {};
-          const alreadyDone = item.status === "saved" || item.status === "skipped";
-          return (
-            <div className="bulk-review">
-              {restoredFromStorage && (
-                <p className="banner banner-good" style={{ marginBottom: 12 }}>
-                  Picked up where you left off — this batch was still waiting for review.
-                </p>
-              )}
-              <div className="bulk-review-topbar">
-                <span>
-                  Card {reviewIndex + 1} of {queue.length}
-                </span>
-                <span className="bulk-review-tally">
-                  {savedCount} saved · {skippedCount} skipped · {matchedCount} matched checklist · ~${batchCostUsd.toFixed(2)} est. cost ({searchedCount} of {identifiedCount} searched)
-                </span>
-              </div>
-              <div className="form-card bulk-form-card">
-                {item.error && (
-                  <p className="identify-error">
-                    {item.error}{" "}
-                    {item.status === "error" && (
-                      <button type="button" className="link-btn" onClick={() => retryIdentify(reviewIndex)}>
-                        Retry identification
-                      </button>
-                    )}
-                  </p>
-                )}
-                {item.status === "retrying" && <p className="scan-status">Retrying...</p>}
-                {item.phoneDetected && (form.purchasePhotoFront || form.purchasePhotoBack) && (
-                  <p className="phone-photo-note">
-                    📷 Looks like a phone photo, not a scan — using a database image where I found one; your photo is kept as a reference.{" "}
-                    <button
-                      type="button"
-                      className="link-btn"
-                      onClick={() =>
-                        updateReviewForm({
-                          personalFront: form.personalFront || form.purchasePhotoFront,
-                          personalBack: form.personalBack || form.purchasePhotoBack,
-                          purchasePhotoFront: null,
-                          purchasePhotoBack: null,
-                          thumbnailSource: "personal",
-                        })
-                      }
-                    >
-                      Actually, use it as my scan
-                    </button>
-                  </p>
-                )}
-                <div className="identify-preview-pair">
-                  <div className="preview-col">
-                    <div
-                      className="identify-preview zoomable"
-                      onClick={() => {
-                        const src = form.personalFront || form.purchasePhotoFront || form.onlineFrontUrl;
-                        if (src) setZoomSrc(src);
-                      }}
-                    >
-                      <CardImage src={form.personalFront || form.purchasePhotoFront || form.onlineFrontUrl} alt="front" fallbackLabel="Front" />
-                    </div>
-                    {(form.personalFront || form.purchasePhotoFront) && (
-                      <button type="button" className="rotate-btn" onClick={() => rotateReviewImage("front")}>⟳ Rotate</button>
-                    )}
-                  </div>
-                  <div className="preview-col">
-                    <div
-                      className="identify-preview zoomable"
-                      onClick={() => {
-                        const src = form.personalBack || form.purchasePhotoBack || form.onlineBackUrl;
-                        if (src) setZoomSrc(src);
-                      }}
-                    >
-                      <CardImage src={form.personalBack || form.purchasePhotoBack || form.onlineBackUrl} alt="back" fallbackLabel="Back" />
-                    </div>
-                    {(form.personalBack || form.purchasePhotoBack) && (
-                      <button type="button" className="rotate-btn" onClick={() => rotateReviewImage("back")}>⟳ Rotate</button>
-                    )}
-                  </div>
-                </div>
-                <p className="zoom-hint">Tap a photo to zoom in.</p>
-                {item.confidence && (
-                  <span className="confidence-badge">
-                    {item.confidence} confidence — check the fields below{item.searched ? " (cross-checked online)" : " (from photo alone, no search needed)"}
-                  </span>
-                )}
-                {!alreadyDone && (
-                  <>
-                    <div className="field-grid" style={{ marginTop: 12 }}>
-                      <div className="field full">
-                        <label>Player</label>
-                        <input value={form.player || ""} onChange={(e) => updateReviewForm({ player: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label>Team</label>
-                        <input value={form.team || ""} onChange={(e) => updateReviewForm({ team: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label>Sport</label>
-                        <select value={form.sport || "Hockey"} onChange={(e) => updateReviewForm({ sport: e.target.value })}>
-                          {SPORTS.map((s) => (
-                            <option key={s} value={s}>
-                              {s}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="field">
-                        <label>Year</label>
-                        <input value={form.year || ""} onChange={(e) => updateReviewForm({ year: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label>Brand</label>
-                        <input value={form.brand || ""} onChange={(e) => updateReviewForm({ brand: e.target.value })} list="brand-options" />
-                      </div>
-                      <div className="field">
-                        <label>Set</label>
-                        <input value={form.set || ""} onChange={(e) => updateReviewForm({ set: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label>Card number</label>
-                        <input value={form.cardNumber || ""} onChange={(e) => updateReviewForm({ cardNumber: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label>Estimated value</label>
-                        <input value={form.value || ""} onChange={(e) => updateReviewForm({ value: e.target.value })} />
-                      </div>
-                    </div>
-                    {item.saveError && <p className="identify-error">{item.saveError}</p>}
-                  </>
-                )}
-                {alreadyDone && (
-                  <div className="bulk-already-done">
-                    <p>{item.status === "saved" ? "✓ Added to your ledger." : "Skipped."}</p>
-                    {item.status === "skipped" && (
-                      <button type="button" className="link-btn" onClick={restoreCurrent}>
-                        Restore & review
-                      </button>
-                    )}
-                  </div>
-                )}
-                <div className="form-actions">
-                  <button type="button" className="btn-secondary" onClick={goPrev} disabled={reviewIndex === 0}>
-                    ◂ Back
-                  </button>
-                  <div className="form-actions-right">
-                    {alreadyDone ? (
-                      <button type="button" className="btn-primary" onClick={goNext}>
-                        {reviewIndex === queue.length - 1 ? "Finish" : "Next ▸"}
-                      </button>
-                    ) : (
-                      <>
-                        <button type="button" className="btn-secondary" onClick={skipCurrent}>
-                          Skip this one
-                        </button>
-                        <button type="button" className="btn-primary" onClick={saveCurrent}>
-                          Save & next
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-      {stage === "done" && (
-        <div className="bulk-done">
-          <h2>Batch complete</h2>
-          <p>
-            {savedCount} card{savedCount === 1 ? "" : "s"} added to your ledger, {matchedCount} matched your Stars checklist,{" "}
-            {skippedCount} skipped.
-          </p>
-          <div className="form-actions-right">
-            <button type="button" className="btn-secondary" onClick={resetBulk}>
-              Start another batch
-            </button>
-            <button type="button" className="btn-primary" onClick={onGoToGallery}>
-              View in gallery
-            </button>
-          </div>
-        </div>
-      )}
-      {zoomSrc && (
-        <div className="overlay zoom-overlay" onClick={() => setZoomSrc(null)}>
-          <img src={zoomSrc} alt="zoomed card" className="zoom-overlay-img" />
-          <button type="button" className="zoom-overlay-close" onClick={() => setZoomSrc(null)}>Close ✕</button>
-        </div>
-      )}
-    </div>
-  );
 }
 
 // --- Bulk Auto-Import: point the SERVER at a folder of subfolders (one per card) and let it
@@ -2259,6 +1382,11 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
   const [jobs, setJobs] = useState([]);
   const [reviewItems, setReviewItems] = useState([]);
   const [drafts, setDrafts] = useState({}); // reviewItemId -> editable form fields
+  const [swappedItems, setSwappedItems] = useState({}); // reviewItemId -> true once "Swap front/back" is clicked
+  const [photoOverrides, setPhotoOverrides] = useState({}); // reviewItemId -> { front?: dataUrl, back?: dataUrl } from "Replace photo"
+  const [replacing, setReplacing] = useState({}); // "<reviewItemId>:<side>" -> true while a replacement photo is being resized
+  const [retrying, setRetrying] = useState({}); // reviewItemId -> true while a retry POST is in flight
+  const [retryError, setRetryError] = useState({}); // reviewItemId -> error message from a failed retry
   const [zoomSrc, setZoomSrc] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
@@ -2419,21 +1547,105 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
     setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
   }
 
+  // Resolves what should actually be stored as this card's front/back, folding together both
+  // corrections a review card can apply: "Swap front/back" (the two photos are of the SAME
+  // physical card, just labeled backwards) and "Replace photo" (one of the two photos is of a
+  // completely different card -- e.g. a >2-image folder pairs strictly by position, so a single
+  // stray or missing photo earlier in that folder shifts every pairing after it, landing the
+  // back of one card next to the front of another -- see groupToItems in bulk-import.js). Always
+  // computed fresh here and sent explicitly to the server, rather than sending flags for the
+  // server to reinterpret, so what Kaleb sees in the review card is exactly what gets saved.
+  function resolveReviewImages(item) {
+    const overrides = photoOverrides[item.id] || {};
+    const baseFront = overrides.front || item.front_storage || null;
+    const baseBack = overrides.back || item.back_storage || null;
+    return swappedItems[item.id] ? { front: baseBack, back: baseFront } : { front: baseFront, back: baseBack };
+  }
+
+  function clearReviewItemLocalState(id) {
+    setSwappedItems((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setPhotoOverrides((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
   async function saveReviewItem(id) {
     const draft = drafts[id];
-    if (!draft || !draft.player.trim()) return;
+    const item = reviewItems.find((r) => r.id === id);
+    if (!draft || !draft.player.trim() || !item) return;
+    const { front, back } = resolveReviewImages(item);
     await fetch(`/api/bulk-import/review/${id}/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
+      body: JSON.stringify({ ...draft, frontImage: front, backImage: back }),
     });
     setReviewItems((prev) => prev.filter((r) => r.id !== id));
+    clearReviewItemLocalState(id);
     if (onCardsMayHaveChanged) onCardsMayHaveChanged();
   }
 
   async function discardReviewItem(id) {
     await fetch(`/api/bulk-import/review/${id}/discard`, { method: "POST" });
     setReviewItems((prev) => prev.filter((r) => r.id !== id));
+    clearReviewItemLocalState(id);
+  }
+
+  function toggleSwapReviewItem(id) {
+    setSwappedItems((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  // "Replace photo" -- for when Swap alone won't fix it because the paired photo isn't just
+  // upside-down/mislabeled, it's a photo of an entirely different physical card. Resizes exactly
+  // like every other photo intake path in this app (fileToResizedDataUrl, 1280px) and stashes the
+  // result locally; nothing is sent to the server until Save or Retry is clicked.
+  async function replaceReviewPhoto(id, side, file) {
+    if (!file) return;
+    const key = `${id}:${side}`;
+    setReplacing((prev) => ({ ...prev, [key]: true }));
+    try {
+      const dataUrl = await fileToResizedDataUrl(file, 1280, 0.85);
+      setPhotoOverrides((prev) => ({ ...prev, [id]: { ...prev[id], [side]: dataUrl } }));
+    } catch (e) {
+      setRetryError((prev) => ({ ...prev, [id]: "Couldn't read that photo -- try a different file." }));
+    } finally {
+      setReplacing((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
+  // Sends the item back through identification instead of fixing it by hand -- see the
+  // server-side route for why this is a real second attempt and not a no-op. If a photo was
+  // replaced above, the corrected photo (not the original) is what gets re-identified. Not
+  // instant: it rejoins the same background import job, so it can take a few minutes or more to
+  // resolve (either landing straight in the collection, or coming back to this list if it's still
+  // not confident) rather than updating in place right away.
+  async function retryReviewItem(id) {
+    const item = reviewItems.find((r) => r.id === id);
+    if (!item) return;
+    const { front, back } = resolveReviewImages(item);
+    setRetrying((prev) => ({ ...prev, [id]: true }));
+    setRetryError((prev) => ({ ...prev, [id]: null }));
+    try {
+      const res = await fetch(`/api/bulk-import/review/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frontImage: front, backImage: back }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't retry this one.");
+      setReviewItems((prev) => prev.filter((r) => r.id !== id));
+      clearReviewItemLocalState(id);
+      await refresh();
+    } catch (e) {
+      setRetryError((prev) => ({ ...prev, [id]: e.message }));
+    } finally {
+      setRetrying((prev) => ({ ...prev, [id]: false }));
+    }
   }
 
   const activeJobs = jobs.filter((j) => j.status === "processing");
@@ -2441,13 +1653,7 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
 
   return (
     <div className="auto-import-panel">
-      <div style={{ maxWidth: 640 }}>
-        <p style={{ marginTop: 0 }}>
-          Pick a folder of card photos (or a folder full of folders, organized however you like) and it identifies, orients, and saves
-          every confident card automatically, no review needed. Anything it isn't confident about lands below for you to check instead
-          of being saved or guessed. This runs through Anthropic's Batch API at half the normal per-card cost, in exchange for taking up
-          to a few hours rather than being instant -- once the upload progress bar below finishes, closing this tab doesn't stop it.
-        </p>
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
         <input
           type="file"
           accept="image/*"
@@ -2559,23 +1765,55 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
           <h3>Needs your review ({reviewItems.length})</h3>
           {reviewItems.map((item) => {
             const draft = drafts[item.id] || {};
+            const swapped = !!swappedItems[item.id];
+            const { front: frontSrc, back: backSrc } = resolveReviewImages(item);
+            const isRetrying = !!retrying[item.id];
+            const replacingFront = !!replacing[`${item.id}:front`];
+            const replacingBack = !!replacing[`${item.id}:back`];
             return (
               <div key={item.id} className="auto-import-review-card">
                 <div className="photo-pair-row">
                   <div className="photo-pair-col">
-                    {item.front_storage && (
-                      <img src={item.front_storage} alt="front" className="review-thumb" onClick={() => setZoomSrc(item.front_storage)} />
-                    )}
+                    {frontSrc && <img src={frontSrc} alt="front" className="review-thumb" onClick={() => setZoomSrc(frontSrc)} />}
+                    <span className="review-thumb-label">Front</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      id={`replace-front-${item.id}`}
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files && e.target.files[0];
+                        e.target.value = "";
+                        if (file) replaceReviewPhoto(item.id, "front", file);
+                      }}
+                    />
+                    <label htmlFor={`replace-front-${item.id}`} className="review-replace-link">
+                      {replacingFront ? "Reading..." : "Replace photo"}
+                    </label>
                   </div>
                   <div className="photo-pair-col">
-                    {item.back_storage && (
-                      <img src={item.back_storage} alt="back" className="review-thumb" onClick={() => setZoomSrc(item.back_storage)} />
-                    )}
+                    {backSrc && <img src={backSrc} alt="back" className="review-thumb" onClick={() => setZoomSrc(backSrc)} />}
+                    <span className="review-thumb-label">Back</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      id={`replace-back-${item.id}`}
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files && e.target.files[0];
+                        e.target.value = "";
+                        if (file) replaceReviewPhoto(item.id, "back", file);
+                      }}
+                    />
+                    <label htmlFor={`replace-back-${item.id}`} className="review-replace-link">
+                      {replacingBack ? "Reading..." : "Replace photo"}
+                    </label>
                   </div>
                 </div>
                 <p style={{ fontSize: 13, opacity: 0.75, margin: "4px 0" }}>
                   {item.reason === "api_error" ? "Couldn't identify this one automatically" : "Not confident enough to auto-add"}
                   {item.folder_name ? ` -- from "${item.folder_name}"` : ""}
+                  {(photoOverrides[item.id] && (photoOverrides[item.id].front || photoOverrides[item.id].back)) ? " -- photo replaced, not yet saved" : ""}
                 </p>
                 <div className="verify-fields">
                   <input placeholder="Player" value={draft.player || ""} onChange={(e) => updateDraft(item.id, "player", e.target.value)} />
@@ -2591,11 +1829,22 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
                   <input placeholder="Card #" value={draft.cardNumber || ""} onChange={(e) => updateDraft(item.id, "cardNumber", e.target.value)} />
                   <input placeholder="Value ($)" value={draft.value || ""} onChange={(e) => updateDraft(item.id, "value", e.target.value)} />
                 </div>
-                <div className="form-actions-right" style={{ marginTop: 8 }}>
-                  <button type="button" className="btn-secondary" onClick={() => discardReviewItem(item.id)}>Discard</button>
-                  <button type="button" className="btn-primary" onClick={() => saveReviewItem(item.id)} disabled={!draft.player || !draft.player.trim()}>
-                    Save to ledger
-                  </button>
+                {retryError[item.id] && <p className="identify-error">{retryError[item.id]}</p>}
+                <div className="form-actions" style={{ marginTop: 8 }}>
+                  <div className="form-actions-right">
+                    <button type="button" className="btn-secondary" onClick={() => toggleSwapReviewItem(item.id)}>
+                      {swapped ? "Undo swap" : "Swap front/back"}
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => retryReviewItem(item.id)} disabled={isRetrying}>
+                      {isRetrying ? "Sending..." : "Retry identification"}
+                    </button>
+                  </div>
+                  <div className="form-actions-right">
+                    <button type="button" className="btn-secondary" onClick={() => discardReviewItem(item.id)}>Discard</button>
+                    <button type="button" className="btn-primary" onClick={() => saveReviewItem(item.id)} disabled={!draft.player || !draft.player.trim()}>
+                      Save to ledger
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -2760,9 +2009,10 @@ export default function CardLedger() {
   const [query, setQuery] = useState("");
   const [sportFilter, setSportFilter] = useState("All");
   const [brandFilter, setBrandFilter] = useState("All");
+  const [teamFilter, setTeamFilter] = useState("All");
   const [sortBy, setSortBy] = useState("dateAdded");
   const [viewMode, setViewMode] = useState("gallery");
-  const [activeTab, setActiveTab] = useState("collection"); // collection | checklist | yg | bulk | appraise
+  const [activeTab, setActiveTab] = useState("collection"); // collection | checklist | yg | autoimport | appraise
   const [flipped, setFlipped] = useState({});
   // "Fix rotation" mode: shows both of a card's own photos on its gallery tile with a rotate
   // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
@@ -2962,7 +2212,7 @@ export default function CardLedger() {
               .map((entry) => {
                 const num = entry.n !== null && entry.n !== undefined && entry.n !== "" ? `#${escapeHtml(entry.n)}` : "";
                 const series = showSeries ? getCardSeries(set.year, entry.n) : null;
-                const seriesHtml = series ? `<span class="series">${escapeHtml(series)}</span>` : "";
+                const seriesHtml = series ? `<span class="series">${escapeHtml(set.year)} ${escapeHtml(series)}</span>` : "";
                 return `<div class="card-row missing"><span class="mark">☐</span><span class="num">${num}</span><span class="name">${escapeHtml(entry.p)}</span>${seriesHtml}</div>`;
               })
               .join("");
@@ -3097,6 +2347,41 @@ export default function CardLedger() {
     });
     return { perSet, totalCards, totalOwned };
   }, [alumniChecklistMatches, checklistManual]);
+
+  // Round 25: which owned cards actually belong to Kaleb's Dallas Stars collection, for gallery
+  // coloring -- NOT the same question as "what team is printed on this card." A Tyler Seguin
+  // rookie card says "Boston Bruins" on the front, but it's tracked here specifically because
+  // Seguin later played for Dallas (see STARS_ALUMNI_YOUNG_GUNS) -- Kaleb wants that card colored
+  // as a Stars card regardless of which team it originally shipped under. Reuses the exact same
+  // matching this app already does for the Stars Checklist/Young Guns tabs (checklistMatches +
+  // alumniChecklistMatches) rather than re-deriving anything -- a card counts as Stars-related if
+  // it's matched into either the main Stars/North Stars checklist or the alumni-Young-Guns list.
+  const starsRelatedCardIds = useMemo(() => {
+    const ids = new Set();
+    for (const arr of checklistMatches.values()) arr.forEach((c) => ids.add(c.id));
+    for (const arr of alumniChecklistMatches.values()) arr.forEach((c) => ids.add(c.id));
+    return ids;
+  }, [checklistMatches, alumniChecklistMatches]);
+
+  // True if a card should be colored/treated as part of the Dallas Stars collection: its own
+  // team field literally says Dallas Stars or Minnesota North Stars (same franchise, pre/post the
+  // 1993 relocation), or it's matched into the checklist/alumni data above regardless of what
+  // team is actually printed on it.
+  function isStarsCollectionCard(c) {
+    return c.team === "Dallas Stars" || c.team === "Minnesota North Stars" || starsRelatedCardIds.has(c.id);
+  }
+
+  // Round 25: group the currently-filtered/sorted gallery list by "same physical card" (player +
+  // year + brand + set + card number) so Kaleb's duplicate copies show as one tile with an "x2"/
+  // "x3" badge instead of cluttering the grid with repeats. Deliberately only used for the plain
+  // gallery view, not "Fix rotation" mode (each physical copy's own photo still needs its own
+  // rotate control there) and not the List/table view (each row stays its own line -- he only
+  // asked for this in the gallery). Groups can't just collapse adjacent entries since sort order
+  // (e.g. "Recently added") can interleave duplicates with unrelated cards -- this does a real
+  // group-by keyed on first-seen order instead.
+  function duplicateGroupKey(c) {
+    return [normName(c.player), (c.year || "").trim().toLowerCase(), (c.brand || "").trim().toLowerCase(), (c.set || "").trim().toLowerCase(), normNum(c.cardNumber)].join("|");
+  }
 
   function resetIdentifyState() {
     setIdentifyRawPreviews([]);
@@ -3427,12 +2712,6 @@ export default function CardLedger() {
     closeEdit();
   }
 
-  // Used by the Bulk Add panel: saves one already-reviewed card straight into the ledger.
-  async function addSingleCardFromBulk(entry) {
-    const next = [...cards, entry];
-    await persist(next);
-  }
-
   // Used by the Appraise panel: opens the normal verify/edit form pre-filled with a
   // quick-appraisal result, so the person can double check it before it's actually added.
   function quickAddFromAppraisal(item) {
@@ -3516,6 +2795,7 @@ export default function CardLedger() {
     let list = cards;
     if (sportFilter !== "All") list = list.filter((c) => c.sport === sportFilter);
     if (brandFilter !== "All") list = list.filter((c) => (c.brand || "") === brandFilter);
+    if (teamFilter !== "All") list = list.filter((c) => (c.team || "") === teamFilter);
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       list = list.filter(
@@ -3535,6 +2815,9 @@ export default function CardLedger() {
       case "player":
         sorted.sort((a, b) => a.player.localeCompare(b.player));
         break;
+      case "team":
+        sorted.sort((a, b) => (a.team || "").localeCompare(b.team || "") || b.dateAdded - a.dateAdded);
+        break;
       case "year":
         sorted.sort((a, b) => (seasonStartYear(b.year) ?? -1) - (seasonStartYear(a.year) ?? -1));
         break;
@@ -3545,12 +2828,64 @@ export default function CardLedger() {
         sorted.sort((a, b) => b.dateAdded - a.dateAdded);
     }
     return sorted;
-  }, [cards, query, sportFilter, brandFilter, sortBy]);
+  }, [cards, query, sportFilter, brandFilter, teamFilter, sortBy]);
+
+  // Round 25: group the currently-filtered/sorted gallery list by "same physical card" (player +
+  // year + brand + set + card number) so Kaleb's duplicate copies show as one tile with an "x2"/
+  // "x3" badge instead of cluttering the grid with repeats. Deliberately only used for the plain
+  // gallery view, not "Fix rotation" mode (each physical copy's own photo still needs its own
+  // rotate control there) and not the List/table view (each row stays its own line -- he only
+  // asked for this in the gallery). Groups can't just collapse adjacent entries since sort order
+  // (e.g. "Recently added") can interleave duplicates with unrelated cards -- this does a real
+  // group-by keyed on first-seen order instead. Must come after `filtered` is declared above (an
+  // earlier version of this lived higher up in the component and referenced `filtered` before its
+  // own declaration -- a real "cannot access before initialization" crash, caught by an actual
+  // render/screenshot check rather than node --check, which can't see this kind of ordering bug).
+  const groupedGalleryCards = useMemo(() => {
+    const groups = new Map();
+    const order = [];
+    filtered.forEach((c) => {
+      const key = duplicateGroupKey(c);
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, card: c, count: 0, copies: [] };
+        groups.set(key, group);
+        order.push(group);
+      }
+      group.count += 1;
+      group.copies.push(c);
+    });
+    return order;
+  }, [filtered]);
 
   const stats = useMemo(() => {
     const totalValue = cards.reduce((s, c) => s + (Number(c.value) || 0), 0);
     return { totalCards: cards.length, totalValue };
   }, [cards]);
+
+  // Subtotal for whatever's currently on screen after search/sport/brand/team filters --
+  // this is what answers "what are just my <team> cards worth" when teamFilter narrows the
+  // view to one team, without changing the always-whole-collection numbers in the stat strip.
+  const filteredStats = useMemo(() => {
+    const totalValue = filtered.reduce((s, c) => s + (Number(c.value) || 0), 0);
+    return { totalCards: filtered.length, totalValue };
+  }, [filtered]);
+
+  // Every team actually present in the collection, for the team filter dropdown -- sorted
+  // alphabetically, same pattern as usedBrands below.
+  const usedTeams = useMemo(() => {
+    const seen = new Set();
+    cards.forEach((c) => { if (c.team) seen.add(c.team); });
+    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+  }, [cards]);
+
+  // Active team-color theme for the Collection tab, only while a specific team is filtered in
+  // (Kaleb's call -- not an app-wide re-theme). Falls back to null (the app's normal look) for
+  // "All teams" and for any team not in TEAM_THEMES.
+  const teamTheme = useMemo(() => {
+    if (teamFilter === "All") return null;
+    return TEAM_THEMES[teamFilter] || null;
+  }, [teamFilter]);
 
   // Every brand actually present in the collection, for the datalist suggestions and the
   // brand filter dropdown -- combined with the starter KNOWN_BRANDS list so a fresh collection
@@ -3568,38 +2903,77 @@ export default function CardLedger() {
   }, [cards]);
 
   return (
-    <div className="ledger-root">
+    <div
+      className={`ledger-root${teamTheme ? " team-themed" : ""}`}
+      style={
+        teamTheme
+          ? { "--team-primary": teamTheme.primary, "--team-accent": teamTheme.accent, "--team-ink": teamTheme.ink }
+          : undefined
+      }
+    >
       <datalist id="brand-options">
         {brandOptions.map((b) => <option key={b} value={b} />)}
       </datalist>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&display=swap');
+
         .ledger-root {
           --paper: #F2EEE2; --paper-line: #D8D0BC; --ink: #1F2A24;
           --navy: #1E3448; --green: #2F4B3C; --gold: #A97D1F; --brick: #8C3B2E; --muted: #6B6555;
+          --ice: #E4F1F4; --rink-line: #4F7FA6;
+          /* Team-color theming (round 21) defaults to the ledger's own palette so every rule
+             below that reads var(--team-*) looks identical to the untouched design until a
+             team filter is active on the Collection tab -- see teamTheme/TEAM_THEMES above. */
+          --team-primary: var(--navy); --team-accent: var(--gold); --team-ink: var(--ink);
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           background: var(--paper); color: var(--ink); min-height: 100%;
           padding: 28px 20px 60px; box-sizing: border-box;
         }
         .ledger-root * { box-sizing: border-box; }
         .ledger-inner { max-width: 960px; margin: 0 auto; }
-        .header-row { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px; border-bottom: 2px solid var(--ink); padding-bottom: 16px; margin-bottom: 22px; }
+        .header-row {
+          position: relative; display: flex; justify-content: space-between; align-items: flex-end;
+          flex-wrap: wrap; gap: 16px; padding-bottom: 18px; margin-bottom: 22px;
+          border-bottom: 2px solid var(--ink);
+        }
+        /* A thin three-bar "rink line" flourish (blue / red / blue) under the header -- an
+           original, generic nod to hockey-rink markings, not any team's actual branding. */
+        .header-row::after {
+          content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 4px;
+          background: linear-gradient(90deg, var(--rink-line) 0 38%, var(--brick) 38% 62%, var(--rink-line) 62% 100%);
+          opacity: 0.55;
+        }
+        .wordmark-row { display: flex; align-items: baseline; gap: 10px; }
         .wordmark { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif; font-size: 34px; font-weight: 700; margin: 0; color: var(--navy); }
-        .subhead { margin: 4px 0 0; font-size: 14px; color: var(--muted); font-style: italic; font-family: Georgia, serif; }
+        .wordmark-tag {
+          font-family: "Oswald", -apple-system, sans-serif; font-size: 11px; font-weight: 600;
+          letter-spacing: 0.11em; text-transform: uppercase; color: var(--paper);
+          background: var(--green); padding: 3px 8px; border-radius: 2px; transform: translateY(-3px);
+        }
 
-        .scan-cta { display: flex; align-items: center; gap: 10px; background: var(--green); color: var(--paper); border: none; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; border-radius: 4px; font-family: inherit; }
-        .scan-cta:hover { background: #24392d; }
+        .scan-cta { display: flex; align-items: center; gap: 10px; background: var(--green); color: var(--paper); border: none; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; border-radius: 4px; font-family: inherit; box-shadow: 0 2px 0 rgba(0,0,0,0.18); transition: transform 0.1s ease, box-shadow 0.1s ease; }
+        .scan-cta:hover { background: #24392d; transform: translateY(-1px); box-shadow: 0 3px 0 rgba(0,0,0,0.2); }
+        .scan-cta:active { transform: translateY(0); box-shadow: 0 1px 0 rgba(0,0,0,0.18); }
         .scan-cta:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
         .scan-cta svg { flex-shrink: 0; }
 
         .stat-strip { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--paper-line); border-bottom: 1px solid var(--paper-line); margin-bottom: 22px; }
-        .stat { padding: 14px 16px; border-left: 1px solid var(--paper-line); }
+        .stat { padding: 14px 16px; border-left: 1px solid var(--paper-line); position: relative; display: flex; align-items: center; gap: 10px; }
         .stat:first-child { border-left: none; }
-        .stat-num { font-family: Georgia, serif; font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; }
-        .stat-label { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+        .stat-icon { flex-shrink: 0; opacity: 0.8; }
+        .stat-num { font-family: "Oswald", Georgia, serif; font-size: 27px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+        .stat-label { font-size: 11.5px; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; }
         .stat-clickable { cursor: pointer; }
         .stat-clickable:hover { background: rgba(30,52,72,0.04); }
 
         .controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+        .team-subtotal {
+          display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #fff;
+          background: linear-gradient(100deg, var(--team-primary), var(--team-ink));
+          border-left: 5px solid var(--team-accent); border-radius: 4px;
+          padding: 9px 14px; margin: -8px 0 16px; text-shadow: 0 1px 1px rgba(0,0,0,0.35);
+        }
+        .team-subtotal strong { font-weight: 700; }
         .controls input[type="text"], .controls select { font-family: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--paper-line); background: #fff; border-radius: 3px; color: var(--ink); }
         .controls input[type="text"] { flex: 1; min-width: 160px; }
         .controls input:focus-visible, .controls select:focus-visible { outline: 2px solid var(--navy); outline-offset: 1px; }
@@ -3607,29 +2981,15 @@ export default function CardLedger() {
         .view-toggle button { background: #fff; border: none; padding: 8px 14px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--muted); }
         .view-toggle button.active { background: var(--navy); color: var(--paper); }
 
-        .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--paper-line); margin-bottom: 18px; }
-        .tab-bar button { background: none; border: none; border-bottom: 2px solid transparent; padding: 9px 4px; margin-right: 18px; font-size: 14.5px; font-weight: 600; color: var(--muted); cursor: pointer; font-family: inherit; }
+        .tab-bar { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--paper-line); margin-bottom: 18px; }
+        .tab-bar button {
+          background: none; border: none; border-bottom: 3px solid transparent; padding: 9px 3px; margin-right: 20px;
+          font-family: "Oswald", -apple-system, sans-serif; font-size: 13.5px; font-weight: 600;
+          letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); cursor: pointer;
+        }
         .tab-bar button:hover { color: var(--ink); }
         .tab-bar button.active { color: var(--navy); border-bottom-color: var(--gold); }
 
-        .bulk-select-buttons { display: flex; gap: 12px; flex-wrap: wrap; }
-        .watch-folder-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--paper-line); }
-        .bulk-pairs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin: 14px 0; }
-        .bulk-pair { border: 1px solid var(--paper-line); border-radius: 4px; padding: 8px; background: #fff; }
-        .bulk-pair-index { font-size: 11px; color: var(--muted); font-family: Georgia, serif; }
-        .bulk-pair-thumbs { display: flex; gap: 6px; margin: 6px 0; }
-        .bulk-pair-thumbs img, .bulk-pair-thumbs .img-fallback { width: 50%; aspect-ratio: 5/7; object-fit: contain; border-radius: 2px; background: #EDE7D6; }
-        .bulk-pair-thumbs .img-fallback { font-size: 9px; color: var(--muted); text-align: center; padding: 4px; }
-        .bulk-pair-missing { width: 50%; aspect-ratio: 5/7; background: #EDE7D6; color: var(--muted); font-size: 10px; display: flex; align-items: center; justify-content: center; text-align: center; border-radius: 2px; }
-        .bulk-pair-actions { display: flex; gap: 8px; justify-content: space-between; }
-        .bulk-pair-actions button { font-size: 11px; }
-        .bulk-review-topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; font-size: 13px; color: var(--muted); flex-wrap: wrap; gap: 6px; }
-        .bulk-review-tally { font-weight: 600; color: var(--navy); }
-        .bulk-form-card { max-width: none; padding: 20px; }
-        .bulk-already-done { padding: 30px 0; text-align: center; color: var(--muted); font-size: 14px; }
-        .bulk-done { text-align: center; padding: 40px 20px; }
-        .bulk-done h2 { font-family: Georgia, serif; color: var(--navy); }
-        .bulk-done .form-actions-right { justify-content: center; margin-top: 18px; }
 
         .appraise-preview-row { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
         .appraise-preview { width: 220px; border-radius: 4px; overflow: hidden; background: #EDE7D6; flex-shrink: 0; }
@@ -3647,6 +3007,8 @@ export default function CardLedger() {
         .auto-import-progress-fill { height: 100%; background: var(--green); }
         .auto-import-review-card { border: 1px solid var(--paper-line); border-radius: 4px; padding: 12px 14px; background: #fff; margin-bottom: 14px; max-width: 640px; }
         .review-thumb { width: 100%; aspect-ratio: 5/7; object-fit: contain; background: #EDE7D6; border-radius: 2px; cursor: zoom-in; }
+        .review-thumb-label { display: block; text-align: center; font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.03em; text-transform: uppercase; }
+        .review-replace-link { display: block; text-align: center; font-size: 12px; color: var(--gold); text-decoration: underline; cursor: pointer; margin-top: 2px; }
         .verify-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
         .verify-fields input, .verify-fields select { font-family: inherit; font-size: 13.5px; padding: 6px 8px; border: 1px solid var(--paper-line); background: #fff; border-radius: 3px; color: var(--ink); }
 
@@ -3700,13 +3062,19 @@ export default function CardLedger() {
         .thumb-cell img, .thumb-cell .img-fallback { width: 100%; height: 100%; object-fit: contain; }
         .player-cell { font-weight: 600; }
         .sub-cell { color: var(--muted); font-size: 12.5px; }
-        .value-cell { font-family: Georgia, serif; font-weight: 700; color: var(--navy); }
+        .value-cell { font-family: Georgia, serif; font-weight: 700; color: var(--card-team-primary, var(--team-primary)); }
 
         .empty-state { padding: 56px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--paper-line); }
         .empty-state p { margin: 0 0 16px; font-size: 15px; }
 
         .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
-        .tile { border: 1px solid var(--paper-line); background: #fff; border-radius: 4px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; }
+        .tile {
+          border: 1px solid var(--paper-line); border-top: 4px solid var(--card-team-primary, var(--team-primary));
+          background: #fff; border-radius: 6px; overflow: hidden; cursor: pointer;
+          display: flex; flex-direction: column; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+          transition: transform 0.12s ease, box-shadow 0.12s ease;
+        }
+        .tile:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,0.14); }
         .tile-img-wrap { position: relative; aspect-ratio: 5 / 7; background: #EDE7D6; }
         .tile-img-wrap img, .img-fallback { width: 100%; height: 100%; object-fit: contain; display: flex; align-items: center; justify-content: center; }
         .img-fallback { color: var(--muted); font-family: Georgia, serif; font-style: italic; font-size: 13px; text-align: center; padding: 10px; }
@@ -3715,10 +3083,11 @@ export default function CardLedger() {
         .tile-source-toggle { position: absolute; bottom: 6px; left: 6px; right: 6px; display: flex; border-radius: 3px; overflow: hidden; font-size: 10.5px; }
         .tile-source-toggle button { flex: 1; border: none; padding: 4px 2px; cursor: pointer; font-family: inherit; background: rgba(255,255,255,0.85); color: var(--muted); }
         .tile-source-toggle button.active { background: var(--gold); color: #fff; }
-        .tile-info { padding: 8px 9px 10px; }
+        .tile-info { padding: 8px 9px 10px; position: relative; }
+        .tile-dupe-badge { position: absolute; right: 9px; bottom: 10px; font-size: 11.5px; font-weight: 700; color: var(--muted); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
         .tile-player { font-weight: 600; font-size: 13.5px; line-height: 1.25; }
         .tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-        .tile-value { font-family: Georgia, serif; font-weight: 700; color: var(--navy); font-size: 13px; margin-top: 4px; }
+        .tile-value { font-family: Georgia, serif; font-weight: 700; color: var(--card-team-primary, var(--team-primary)); font-size: 13px; margin-top: 4px; }
         .tile-editmode { cursor: default; }
         .tile-rotate-row { display: flex; }
         .tile-rotate-col { flex: 1; min-width: 0; }
@@ -3832,8 +3201,10 @@ export default function CardLedger() {
       <div className="ledger-inner">
         <div className="header-row">
           <div>
-            <p className="wordmark">Bench</p>
-            <p className="subhead">a running tally of the collection</p>
+            <div className="wordmark-row">
+              <p className="wordmark">Bench</p>
+              <span className="wordmark-tag">Hockey Card Ledger</span>
+            </div>
           </div>
           <button className="scan-cta" onClick={openScan}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3849,7 +3220,6 @@ export default function CardLedger() {
           <button className={activeTab === "collection" ? "active" : ""} onClick={() => setActiveTab("collection")}>Gallery</button>
           <button className={activeTab === "checklist" ? "active" : ""} onClick={() => setActiveTab("checklist")}>Stars Checklist</button>
           <button className={activeTab === "yg" ? "active" : ""} onClick={() => setActiveTab("yg")}>Young Guns</button>
-          <button className={activeTab === "bulk" ? "active" : ""} onClick={() => setActiveTab("bulk")}>Bulk Add</button>
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
           <button className={activeTab === "appraise" ? "active" : ""} onClick={() => setActiveTab("appraise")}>Appraise</button>
         </div>
@@ -3864,11 +3234,28 @@ export default function CardLedger() {
         )}
 
         <div className="stat-strip">
-          <div className="stat"><div className="stat-num">{stats.totalCards}</div><div className="stat-label">cards in the collection</div></div>
-          <div className="stat"><div className="stat-num">{money(stats.totalValue)}</div><div className="stat-label">estimated value</div></div>
+          <div className="stat">
+            <svg className="stat-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="3" width="12" height="16" rx="2" />
+              <rect x="8" y="6" width="12" height="16" rx="2" fill="var(--paper)" />
+            </svg>
+            <div><div className="stat-num">{stats.totalCards}</div><div className="stat-label">cards in the collection</div></div>
+          </div>
+          <div className="stat">
+            <svg className="stat-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v10M9 9.5c0-1.4 1.3-2.5 3-2.5s3 .9 3 2.1c0 2.9-6 1.6-6 4.5 0 1.2 1.3 2.1 3 2.1s3-1.1 3-2.5" />
+            </svg>
+            <div><div className="stat-num">{money(stats.totalValue)}</div><div className="stat-label">estimated value</div></div>
+          </div>
           <div className="stat stat-clickable" onClick={() => setActiveTab("checklist")}>
-            <div className="stat-num">{checklistProgress.totalOwned} / {checklistProgress.totalCards}</div>
-            <div className="stat-label">Stars base cards collected</div>
+            <svg className="stat-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--navy)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3l2.4 5 5.6.6-4.2 3.8 1.2 5.5L12 15l-5 2.9 1.2-5.5-4.2-3.8 5.6-.6z" />
+            </svg>
+            <div>
+              <div className="stat-num">{checklistProgress.totalOwned} / {checklistProgress.totalCards}</div>
+              <div className="stat-label">Stars base cards collected</div>
+            </div>
           </div>
         </div>
 
@@ -3929,10 +3316,17 @@ export default function CardLedger() {
                 {usedBrands.map((b) => <option key={b} value={b}>{b}</option>)}
               </select>
             )}
+            {usedTeams.length > 0 && (
+              <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
+                <option value="All">All teams</option>
+                {usedTeams.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            )}
             <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
               <option value="dateAdded">Recently added</option>
               <option value="valueDesc">Highest value</option>
               <option value="player">Player name</option>
+              <option value="team">Team name</option>
               <option value="year">Year (newest first)</option>
               <option value="yearAsc">Year (oldest first)</option>
             </select>
@@ -3954,6 +3348,12 @@ export default function CardLedger() {
                 {galleryEditMode ? "Done fixing rotation" : "Fix rotation"}
               </button>
             )}
+          </div>
+        )}
+
+        {activeTab === "collection" && teamFilter !== "All" && (
+          <div className="team-subtotal">
+            <strong>{teamFilter}</strong>: {filteredStats.totalCards} card{filteredStats.totalCards === 1 ? "" : "s"} · {money(filteredStats.totalValue)} estimated value
           </div>
         )}
 
@@ -4049,8 +3449,6 @@ export default function CardLedger() {
               ))
             )}
           </div>
-        ) : activeTab === "bulk" ? (
-          <BulkAddPanel onAddCard={addSingleCardFromBulk} onGoToGallery={() => setActiveTab("collection")} />
         ) : activeTab === "autoimport" ? (
           <AutoImportPanel onCardsMayHaveChanged={reloadCardsFromStorage} />
         ) : activeTab === "appraise" ? (
@@ -4073,10 +3471,13 @@ export default function CardLedger() {
           </div>
         ) : viewMode === "gallery" ? (
           <div className="gallery-grid">
-            {filtered.map((c) => {
+            {(galleryEditMode
+              ? filtered.map((c) => ({ card: c, count: 1, key: c.id }))
+              : groupedGalleryCards.map((g) => ({ card: g.card, count: g.count, key: g.key }))
+            ).map(({ card: c, count, key }) => {
               if (galleryEditMode) {
                 return (
-                  <div className="tile tile-editmode" key={c.id}>
+                  <div className="tile tile-editmode" key={key}>
                     <div className="tile-rotate-row">
                       {["front", "back"].map((face) => {
                         const localImg = face === "front" ? c.personalFront || c.purchasePhotoFront : c.personalBack || c.purchasePhotoBack;
@@ -4114,8 +3515,18 @@ export default function CardLedger() {
               const pair = getDisplay(c);
               const shown = pair.front || pair.back;
               const hasBoth = (c.onlineFrontUrl || c.onlineBackUrl) && (c.personalFront || c.personalBack);
+              // Each tile shows its own card's team colors, always -- not only while the team
+              // filter narrows the view to one team (that's a separate, additional highlight --
+              // see teamTheme/the subtotal banner). Dallas Stars / Minnesota North Stars cards,
+              // AND any card that's actually tracked as a Stars alumnus's Young Guns card (see
+              // isStarsCollectionCard/starsRelatedCardIds above), always render in Stars green --
+              // Kaleb wants that regardless of which team is actually printed on the card itself.
+              // Everything else falls back to that card's own printed team, or the app's default
+              // navy/gold accent if that team isn't in TEAM_THEMES either.
+              const cardTheme = isStarsCollectionCard(c) ? TEAM_THEMES["Dallas Stars"] : TEAM_THEMES[c.team] || null;
+              const cardThemeStyle = cardTheme ? { "--card-team-primary": cardTheme.primary } : undefined;
               return (
-                <div className="tile" key={c.id} onClick={() => openDetail(c)}>
+                <div className="tile" key={key} style={cardThemeStyle} onClick={() => openDetail(c)}>
                   <div className="tile-img-wrap">
                     <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
                     {hasBoth && (
@@ -4129,6 +3540,7 @@ export default function CardLedger() {
                     <div className="tile-player">{c.player}</div>
                     <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
                     <div className="tile-value">{moneyOrDash(c.value)}</div>
+                    {count > 1 && <span className="tile-dupe-badge" title={`${count} copies of this card in your ledger`}>×{count}</span>}
                   </div>
                 </div>
               );
@@ -4140,8 +3552,9 @@ export default function CardLedger() {
             <tbody>
               {filtered.map((c) => {
                 const pair = getDisplay(c);
+                const cardTheme = isStarsCollectionCard(c) ? TEAM_THEMES["Dallas Stars"] : TEAM_THEMES[c.team] || null;
                 return (
-                  <tr key={c.id} onClick={() => openDetail(c)}>
+                  <tr key={c.id} style={cardTheme ? { "--card-team-primary": cardTheme.primary } : undefined} onClick={() => openDetail(c)}>
                     <td><div className="thumb-cell"><CardImage src={pair.front || pair.back} alt={c.player} fallbackLabel="—" /></div></td>
                     <td><div className="player-cell">{c.player}</div>{c.team && <div className="sub-cell">{c.team}</div>}</td>
                     <td><div>{c.sport}</div><div className="sub-cell">{c.year}</div></td>
@@ -4171,7 +3584,7 @@ export default function CardLedger() {
             <p className="checklist-info-note">
               {checklistInfoEntry.manual
                 ? "You've checked this off by hand -- there's no scanned card behind it yet, so there's nothing more to show. Scan it any time to file the real thing."
-                : "This one hasn't been matched to anything in your ledger yet. Scan it (or use Bulk Add) and it'll check itself off automatically."}
+                : "This one hasn't been matched to anything in your ledger yet. Scan it (or bring it in through Auto Import) and it'll check itself off automatically."}
             </p>
             <div className="form-actions">
               <span />
