@@ -56,6 +56,12 @@ const TEAM_THEMES = {
 const STORAGE_KEY = "card-ledger-entries";
 
 const CHECKLIST_MANUAL_KEY = "card-ledger-checklist-manual";
+// Persisted seller bundles (round 31) -- each is { id, kind, team, cardIds, createdAt, sold }.
+// Separate from the ledger itself so "physically bundled" cards can be looked up by id from the
+// live `cards` array (values/photos etc. always reflect whatever's currently saved) while the
+// *grouping* itself -- which cards go together -- stays fixed once Kaleb locks it in, instead of
+// reshuffling every time the Sellers tab recomputes its suggestions.
+const SELLER_BUNDLES_KEY = "card-ledger-seller-bundles";
 // Filenames already seen in a watched scan folder, so re-checking it only turns up genuinely new
 // scans rather than re-queuing everything in the folder every time.
 const WATCH_SEEN_KEY = "card-ledger-watch-seen-files";
@@ -1303,7 +1309,7 @@ function ChecklistYearSection({
   );
 }
 
-function CardImage({ src, alt, fallbackLabel }) {
+function CardImage({ src, alt, fallbackLabel, onOrientation }) {
   const [errored, setErrored] = useState(false);
   useEffect(() => setErrored(false), [src]);
   if (!src || errored) {
@@ -1313,7 +1319,14 @@ function CardImage({ src, alt, fallbackLabel }) {
       </div>
     );
   }
-  return <img src={src} alt={alt} onError={() => setErrored(true)} />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      onError={() => setErrored(true)}
+      onLoad={onOrientation ? (e) => onOrientation(e.target.naturalWidth > e.target.naturalHeight) : undefined}
+    />
+  );
 }
 
 // --- Bulk Auto-Import: point the SERVER at a folder of subfolders (one per card) and let it
@@ -1380,49 +1393,22 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
   const [jobs, setJobs] = useState([]);
-  const [reviewItems, setReviewItems] = useState([]);
-  const [drafts, setDrafts] = useState({}); // reviewItemId -> editable form fields
-  const [swappedItems, setSwappedItems] = useState({}); // reviewItemId -> true once "Swap front/back" is clicked
-  const [photoOverrides, setPhotoOverrides] = useState({}); // reviewItemId -> { front?: dataUrl, back?: dataUrl } from "Replace photo"
-  const [replacing, setReplacing] = useState({}); // "<reviewItemId>:<side>" -> true while a replacement photo is being resized
-  const [retrying, setRetrying] = useState({}); // reviewItemId -> true while a retry POST is in flight
-  const [retryError, setRetryError] = useState({}); // reviewItemId -> error message from a failed retry
-  const [zoomSrc, setZoomSrc] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
   const [uploadError, setUploadError] = useState(null);
   const [uploadDone, setUploadDone] = useState(null);
+  const [retryingJobId, setRetryingJobId] = useState(null);
+  const [retryJobError, setRetryJobError] = useState(null);
 
+  // Round 28: the actual "needs your review" queue moved to its own top-level Review tab
+  // (ReviewPanel, below) so it lives in one place alongside manually-flagged gallery cards,
+  // instead of being buried inside this tab. This panel now only tracks job status + uploading.
   async function refresh() {
     try {
-      const [jobsRes, reviewRes] = await Promise.all([
-        fetch("/api/bulk-import/jobs").then((r) => r.json()),
-        fetch("/api/bulk-import/review").then((r) => r.json()),
-      ]);
+      const jobsRes = await fetch("/api/bulk-import/jobs").then((r) => r.json());
       setJobs((jobsRes && jobsRes.jobs) || []);
-      const items = (reviewRes && reviewRes.items) || [];
-      setReviewItems(items);
-      setDrafts((prev) => {
-        const next = { ...prev };
-        for (const item of items) {
-          if (!next[item.id]) {
-            const g = item.guess || {};
-            next[item.id] = {
-              player: g.player || "",
-              team: g.team || "",
-              sport: SPORTS.includes(g.sport) ? g.sport : "Hockey",
-              year: g.year ? String(g.year) : "",
-              brand: g.brand || "",
-              set: g.set || "",
-              cardNumber: g.cardNumber || "",
-              value: g.estimatedValue !== null && g.estimatedValue !== undefined ? String(g.estimatedValue) : "",
-              onlineFrontUrl: g.frontImageUrl || null,
-              onlineBackUrl: g.backImageUrl || null,
-            };
-          }
-        }
-        return next;
-      });
+      // A running job can auto-save confident cards straight into the ledger server-side with
+      // this tab just sitting here polling -- keep the Gallery in sync without a manual refresh.
       if (onCardsMayHaveChanged) onCardsMayHaveChanged();
     } catch (e) {
       // transient network hiccup while polling -- next poll will just try again
@@ -1435,6 +1421,26 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Round 32: an errored job (most commonly: the Anthropic account ran out of API credit
+  // mid-run) sits stuck forever on its own -- the background tick loop only ever re-processes
+  // jobs whose status is 'processing', and nothing else in the app resets that. This just calls
+  // the new retry endpoint, which flips the job back to 'processing' server-side so the next
+  // background tick picks it back up right where it left off.
+  async function retryJob(jobId) {
+    setRetryingJobId(jobId);
+    setRetryJobError(null);
+    try {
+      const res = await fetch(`/api/bulk-import/jobs/${jobId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't retry that import.");
+      await refresh();
+    } catch (e) {
+      setRetryJobError(e.message);
+    } finally {
+      setRetryingJobId(null);
+    }
+  }
 
   async function startImport() {
     if (!folderInput.trim()) {
@@ -1540,111 +1546,6 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
       );
     } finally {
       setUploading(false);
-    }
-  }
-
-  function updateDraft(id, field, value) {
-    setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
-  }
-
-  // Resolves what should actually be stored as this card's front/back, folding together both
-  // corrections a review card can apply: "Swap front/back" (the two photos are of the SAME
-  // physical card, just labeled backwards) and "Replace photo" (one of the two photos is of a
-  // completely different card -- e.g. a >2-image folder pairs strictly by position, so a single
-  // stray or missing photo earlier in that folder shifts every pairing after it, landing the
-  // back of one card next to the front of another -- see groupToItems in bulk-import.js). Always
-  // computed fresh here and sent explicitly to the server, rather than sending flags for the
-  // server to reinterpret, so what Kaleb sees in the review card is exactly what gets saved.
-  function resolveReviewImages(item) {
-    const overrides = photoOverrides[item.id] || {};
-    const baseFront = overrides.front || item.front_storage || null;
-    const baseBack = overrides.back || item.back_storage || null;
-    return swappedItems[item.id] ? { front: baseBack, back: baseFront } : { front: baseFront, back: baseBack };
-  }
-
-  function clearReviewItemLocalState(id) {
-    setSwappedItems((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-    setPhotoOverrides((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  }
-
-  async function saveReviewItem(id) {
-    const draft = drafts[id];
-    const item = reviewItems.find((r) => r.id === id);
-    if (!draft || !draft.player.trim() || !item) return;
-    const { front, back } = resolveReviewImages(item);
-    await fetch(`/api/bulk-import/review/${id}/save`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...draft, frontImage: front, backImage: back }),
-    });
-    setReviewItems((prev) => prev.filter((r) => r.id !== id));
-    clearReviewItemLocalState(id);
-    if (onCardsMayHaveChanged) onCardsMayHaveChanged();
-  }
-
-  async function discardReviewItem(id) {
-    await fetch(`/api/bulk-import/review/${id}/discard`, { method: "POST" });
-    setReviewItems((prev) => prev.filter((r) => r.id !== id));
-    clearReviewItemLocalState(id);
-  }
-
-  function toggleSwapReviewItem(id) {
-    setSwappedItems((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  // "Replace photo" -- for when Swap alone won't fix it because the paired photo isn't just
-  // upside-down/mislabeled, it's a photo of an entirely different physical card. Resizes exactly
-  // like every other photo intake path in this app (fileToResizedDataUrl, 1280px) and stashes the
-  // result locally; nothing is sent to the server until Save or Retry is clicked.
-  async function replaceReviewPhoto(id, side, file) {
-    if (!file) return;
-    const key = `${id}:${side}`;
-    setReplacing((prev) => ({ ...prev, [key]: true }));
-    try {
-      const dataUrl = await fileToResizedDataUrl(file, 1280, 0.85);
-      setPhotoOverrides((prev) => ({ ...prev, [id]: { ...prev[id], [side]: dataUrl } }));
-    } catch (e) {
-      setRetryError((prev) => ({ ...prev, [id]: "Couldn't read that photo -- try a different file." }));
-    } finally {
-      setReplacing((prev) => ({ ...prev, [key]: false }));
-    }
-  }
-
-  // Sends the item back through identification instead of fixing it by hand -- see the
-  // server-side route for why this is a real second attempt and not a no-op. If a photo was
-  // replaced above, the corrected photo (not the original) is what gets re-identified. Not
-  // instant: it rejoins the same background import job, so it can take a few minutes or more to
-  // resolve (either landing straight in the collection, or coming back to this list if it's still
-  // not confident) rather than updating in place right away.
-  async function retryReviewItem(id) {
-    const item = reviewItems.find((r) => r.id === id);
-    if (!item) return;
-    const { front, back } = resolveReviewImages(item);
-    setRetrying((prev) => ({ ...prev, [id]: true }));
-    setRetryError((prev) => ({ ...prev, [id]: null }));
-    try {
-      const res = await fetch(`/api/bulk-import/review/${id}/retry`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ frontImage: front, backImage: back }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't retry this one.");
-      setReviewItems((prev) => prev.filter((r) => r.id !== id));
-      clearReviewItemLocalState(id);
-      await refresh();
-    } catch (e) {
-      setRetryError((prev) => ({ ...prev, [id]: e.message }));
-    } finally {
-      setRetrying((prev) => ({ ...prev, [id]: false }));
     }
   }
 
@@ -1755,14 +1656,229 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
                 {job.cost_usd.toFixed(2)} total
               </p>
               {job.error_message && <p className="identify-error">{job.error_message}</p>}
+              {job.status === "error" && (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => retryJob(job.id)}
+                    disabled={retryingJobId === job.id}
+                  >
+                    {retryingJobId === job.id ? "Retrying..." : "Retry"}
+                  </button>
+                  <p style={{ fontSize: 12, opacity: 0.7, margin: "4px 0 0" }}>
+                    Ran out of API credit or hit a network hiccup? Add credit to your Anthropic account first, then hit Retry -- it'll
+                    pick back up right where it stopped, not start over.
+                  </p>
+                  {retryJobError && retryingJobId === null && <p className="identify-error">{retryJobError}</p>}
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
+    </div>
+  );
+}
+
+// --- Review: cards Kaleb flagged himself from the Gallery/detail view, AND whatever Auto Import
+// couldn't confidently identify on its own (moved here from the Auto Import tab, round 28, so
+// there's one place to work through everything needing a second look instead of two). ---
+function ReviewPanel({ flaggedCards, onToggleNeedsReview, onOpenDetail, onCardsMayHaveChanged, getDisplay }) {
+  const [reviewItems, setReviewItems] = useState([]);
+  const [drafts, setDrafts] = useState({}); // reviewItemId -> editable form fields
+  const [swappedItems, setSwappedItems] = useState({}); // reviewItemId -> true once "Swap front/back" is clicked
+  const [photoOverrides, setPhotoOverrides] = useState({}); // reviewItemId -> { front?: dataUrl, back?: dataUrl } from "Replace photo"
+  const [replacing, setReplacing] = useState({}); // "<reviewItemId>:<side>" -> true while a replacement photo is being resized
+  const [retrying, setRetrying] = useState({}); // reviewItemId -> true while a retry POST is in flight
+  const [retryError, setRetryError] = useState({}); // reviewItemId -> error message from a failed retry
+  const [zoomSrc, setZoomSrc] = useState(null);
+
+  async function refresh() {
+    try {
+      const reviewRes = await fetch("/api/bulk-import/review").then((r) => r.json());
+      const items = (reviewRes && reviewRes.items) || [];
+      setReviewItems(items);
+      setDrafts((prev) => {
+        const next = { ...prev };
+        for (const item of items) {
+          if (!next[item.id]) {
+            const g = item.guess || {};
+            next[item.id] = {
+              player: g.player || "",
+              team: g.team || "",
+              sport: SPORTS.includes(g.sport) ? g.sport : "Hockey",
+              year: g.year ? String(g.year) : "",
+              brand: g.brand || "",
+              set: g.set || "",
+              cardNumber: g.cardNumber || "",
+              value: g.estimatedValue !== null && g.estimatedValue !== undefined ? String(g.estimatedValue) : "",
+              onlineFrontUrl: g.frontImageUrl || null,
+              onlineBackUrl: g.backImageUrl || null,
+            };
+          }
+        }
+        return next;
+      });
+    } catch (e) {
+      // transient network hiccup while polling -- next poll will just try again
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 6000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function updateDraft(id, field, value) {
+    setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
+  }
+
+  // Resolves what should actually be stored as this card's front/back, folding together both
+  // corrections a review card can apply: "Swap front/back" (the two photos are of the SAME
+  // physical card, just labeled backwards) and "Replace photo" (one of the two photos is of a
+  // completely different card -- e.g. a >2-image folder pairs strictly by position, so a single
+  // stray or missing photo earlier in that folder shifts every pairing after it, landing the
+  // back of one card next to the front of another -- see groupToItems in bulk-import.js). Always
+  // computed fresh here and sent explicitly to the server, rather than sending flags for the
+  // server to reinterpret, so what Kaleb sees in the review card is exactly what gets saved.
+  function resolveReviewImages(item) {
+    const overrides = photoOverrides[item.id] || {};
+    const baseFront = overrides.front || item.front_storage || null;
+    const baseBack = overrides.back || item.back_storage || null;
+    return swappedItems[item.id] ? { front: baseBack, back: baseFront } : { front: baseFront, back: baseBack };
+  }
+
+  function clearReviewItemLocalState(id) {
+    setSwappedItems((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setPhotoOverrides((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  async function saveReviewItem(id) {
+    const draft = drafts[id];
+    const item = reviewItems.find((r) => r.id === id);
+    if (!draft || !draft.player.trim() || !item) return;
+    const { front, back } = resolveReviewImages(item);
+    await fetch(`/api/bulk-import/review/${id}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...draft, frontImage: front, backImage: back }),
+    });
+    setReviewItems((prev) => prev.filter((r) => r.id !== id));
+    clearReviewItemLocalState(id);
+    if (onCardsMayHaveChanged) onCardsMayHaveChanged();
+  }
+
+  async function discardReviewItem(id) {
+    await fetch(`/api/bulk-import/review/${id}/discard`, { method: "POST" });
+    setReviewItems((prev) => prev.filter((r) => r.id !== id));
+    clearReviewItemLocalState(id);
+  }
+
+  function toggleSwapReviewItem(id) {
+    setSwappedItems((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  // "Replace photo" -- for when Swap alone won't fix it because the paired photo isn't just
+  // upside-down/mislabeled, it's a photo of an entirely different physical card. Resizes exactly
+  // like every other photo intake path in this app (fileToResizedDataUrl, 1280px) and stashes the
+  // result locally; nothing is sent to the server until Save or Retry is clicked.
+  async function replaceReviewPhoto(id, side, file) {
+    if (!file) return;
+    const key = `${id}:${side}`;
+    setReplacing((prev) => ({ ...prev, [key]: true }));
+    try {
+      const dataUrl = await fileToResizedDataUrl(file, 1280, 0.85);
+      setPhotoOverrides((prev) => ({ ...prev, [id]: { ...prev[id], [side]: dataUrl } }));
+    } catch (e) {
+      setRetryError((prev) => ({ ...prev, [id]: "Couldn't read that photo -- try a different file." }));
+    } finally {
+      setReplacing((prev) => ({ ...prev, [key]: false }));
+    }
+  }
+
+  // Sends the item back through identification instead of fixing it by hand -- see the
+  // server-side route for why this is a real second attempt and not a no-op. If a photo was
+  // replaced above, the corrected photo (not the original) is what gets re-identified. Not
+  // instant: it rejoins the same background import job, so it can take a few minutes or more to
+  // resolve (either landing straight in the collection, or coming back to this list if it's still
+  // not confident) rather than updating in place right away.
+  async function retryReviewItem(id) {
+    const item = reviewItems.find((r) => r.id === id);
+    if (!item) return;
+    const { front, back } = resolveReviewImages(item);
+    setRetrying((prev) => ({ ...prev, [id]: true }));
+    setRetryError((prev) => ({ ...prev, [id]: null }));
+    try {
+      const res = await fetch(`/api/bulk-import/review/${id}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frontImage: front, backImage: back }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't retry this one.");
+      setReviewItems((prev) => prev.filter((r) => r.id !== id));
+      clearReviewItemLocalState(id);
+      await refresh();
+    } catch (e) {
+      setRetryError((prev) => ({ ...prev, [id]: e.message }));
+    } finally {
+      setRetrying((prev) => ({ ...prev, [id]: false }));
+    }
+  }
+
+  const hasAnything = flaggedCards.length > 0 || reviewItems.length > 0;
+
+  return (
+    <div className="auto-import-panel">
+      {!hasAnything && (
+        <p style={{ fontSize: 14, opacity: 0.7, textAlign: "center", marginTop: 40 }}>Nothing needs review right now.</p>
+      )}
+
+      {flaggedCards.length > 0 && (
+        <div>
+          <h3>Flagged by you ({flaggedCards.length})</h3>
+          {flaggedCards.map((c) => {
+            const pair = getDisplay(c);
+            const shown = pair.front || pair.back;
+            return (
+              <div key={c.id} className="auto-import-review-card review-flagged-card">
+                <div className="photo-pair-row">
+                  <div style={{ flex: "0 0 90px" }}>
+                    <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div className="tile-player">{c.player}</div>
+                    <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
+                    <div className="tile-value">{moneyOrDash(c.value)}</div>
+                  </div>
+                </div>
+                <div className="form-actions" style={{ marginTop: 8 }}>
+                  <button type="button" className="btn-secondary" onClick={() => onToggleNeedsReview(c.id)}>Remove from review</button>
+                  <div className="form-actions-right">
+                    <button type="button" className="btn-primary" onClick={() => onOpenDetail(c)}>Open</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {reviewItems.length > 0 && (
-        <div style={{ marginTop: 32 }}>
-          <h3>Needs your review ({reviewItems.length})</h3>
+        <div style={{ marginTop: flaggedCards.length > 0 ? 32 : 0 }}>
+          <h3>From Auto Import ({reviewItems.length})</h3>
           {reviewItems.map((item) => {
             const draft = drafts[item.id] || {};
             const swapped = !!swappedItems[item.id];
@@ -1979,6 +2095,345 @@ function AppraisePanel({ onQuickAdd }) {
   );
 }
 
+// Splits one team's cards into as many equal-size packs as they'll fill (Kaleb's own eBay
+// convention: packs of a fixed size, 20 by default), balancing approximate value across those
+// packs so no single pack is stuck with all the cheap commons or all the expensive hits.
+// Greedy LPT (longest-processing-time-first) bin-balancing: sort cards richest-first, then always
+// drop the next card into whichever pack (that still has room) currently holds the least value.
+// This doesn't guarantee perfectly equal totals, but it's the standard cheap heuristic for
+// balanced-partition problems like this and gets close in practice. Any cards left over once
+// every pack is full (count isn't an exact multiple of the pack size) come out lowest-value-first,
+// since those are exactly the cards a value-first sort processes last -- so what's left behind is
+// naturally "the extras," not an arbitrary bite taken out of the good stuff.
+function buildSellerBundles(teamCards, bundleSize) {
+  const numBundles = Math.floor(teamCards.length / bundleSize);
+  if (numBundles === 0) return { bundles: [], leftover: teamCards.slice() };
+  const sorted = [...teamCards].sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0));
+  const bundles = Array.from({ length: numBundles }, () => ({ cards: [], total: 0 }));
+  const leftover = [];
+  sorted.forEach((card) => {
+    let target = null;
+    bundles.forEach((bin) => {
+      if (bin.cards.length >= bundleSize) return;
+      if (!target || bin.total < target.total) target = bin;
+    });
+    if (target) {
+      target.cards.push(card);
+      target.total += Number(card.value) || 0;
+    } else {
+      leftover.push(card);
+    }
+  });
+  return { bundles, leftover };
+}
+
+// Groups every sellable card by team into balanced packs (buildSellerBundles above), then pools
+// whatever's left over from each team together and bundles THAT into "mixed teams" packs of the
+// same size -- so a team with too few cards on its own for a full pack still gets its cards onto
+// a listing eventually, instead of just sitting unbundled forever. Returns one "listing" per pack
+// (team packs first, then mixed), sorted richest-first, plus whatever's left after even the mixed
+// pass (too little of everything to fill one more pack).
+function buildSellerListings(sellableCards, bundleSize) {
+  const byTeam = new Map();
+  sellableCards.forEach((c) => {
+    const team = c.team || "Unlisted team";
+    if (!byTeam.has(team)) byTeam.set(team, []);
+    byTeam.get(team).push(c);
+  });
+  const listings = [];
+  const pooledLeftover = [];
+  byTeam.forEach((teamCards, team) => {
+    const { bundles, leftover } = buildSellerBundles(teamCards, bundleSize);
+    bundles.forEach((b) => listings.push({ kind: "team", team, cards: b.cards, total: b.total }));
+    pooledLeftover.push(...leftover);
+  });
+  const mixed = buildSellerBundles(pooledLeftover, bundleSize);
+  mixed.bundles.forEach((b) => listings.push({ kind: "mixed", cards: b.cards, total: b.total }));
+  listings.sort((a, b) => b.total - a.total);
+  return { listings, finalLeftover: mixed.leftover };
+}
+
+// A generic, eBay-ready draft title -- not tied to any specific team's branding, just what's
+// actually in the pack: how many cards, which brand(s), which year(s). Kaleb can always tweak the
+// wording himself before actually posting; this just saves starting from a blank field every time.
+function suggestedListingTitle(listing) {
+  const years = listing.cards
+    .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
+    .filter((n) => !isNaN(n));
+  const yearLabel = years.length
+    ? Math.min(...years) === Math.max(...years)
+      ? String(Math.min(...years))
+      : `${Math.min(...years)}-${Math.max(...years)}`
+    : "Mixed Years";
+  const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
+  const brandLabel = brands.length === 1 ? brands[0] : brands.length > 1 ? "Mixed Brands" : "";
+  const subject = listing.kind === "mixed" ? "Mixed NHL Teams" : listing.team;
+  return `${subject} Hockey Card Lot — ${listing.cards.length} Cards${brandLabel ? ` — ${brandLabel}` : ""} — ${yearLabel}`;
+}
+
+function listingTeamBreakdown(listing) {
+  const counts = new Map();
+  listing.cards.forEach((c) => {
+    const t = c.team || "Unlisted team";
+    counts.set(t, (counts.get(t) || 0) + 1);
+  });
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+}
+
+function buildListingCopyText(listing, discountPct) {
+  const suggested = listing.total * (1 - discountPct / 100);
+  const lines = [
+    suggestedListingTitle(listing),
+    "",
+    `Suggested price: ${money(suggested)}  (book value ${money(listing.total)}, ${discountPct}% off)`,
+    listing.kind === "mixed"
+      ? `${listing.cards.length} cards — ${listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}`
+      : `${listing.cards.length} cards — ${listing.team}`,
+    "",
+    "Cards included:",
+    ...listing.cards.map((c) => `${[c.year, c.brand, c.set].filter(Boolean).join(" ")} ${c.player}${c.cardNumber ? ` #${c.cardNumber}` : ""} — ${moneyOrDash(c.value)}`),
+  ];
+  return lines.join("\n");
+}
+
+function SellerPanel({ cards, bundles, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold }) {
+  const [bundleSize, setBundleSize] = useState(20);
+  const [discountPct, setDiscountPct] = useState(50);
+  const [copiedKey, setCopiedKey] = useState(null);
+
+  const safeBundleSize = Math.max(1, Math.round(Number(bundleSize) || 20));
+  const safeDiscount = Math.min(100, Math.max(0, Math.round(Number(discountPct) || 0)));
+
+  const cardById = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
+  const bundledIds = useMemo(() => new Set(bundles.flatMap((b) => b.cardIds)), [bundles]);
+
+  // Reconstructs each persisted bundle into the same {kind, team, cards, total} shape a freshly
+  // suggested listing has, looking its cards up live in the current `cards` array so a price or
+  // photo edit made after bundling still shows correctly -- only the GROUPING (which card ids
+  // belong together) is what's actually locked in and immune to future re-bundling.
+  const bundleListings = useMemo(
+    () =>
+      bundles.map((b) => {
+        const bundleCards = b.cardIds.map((id) => cardById.get(id)).filter(Boolean);
+        const total = bundleCards.reduce((s, c) => s + (Number(c.value) || 0), 0);
+        return { id: b.id, kind: b.kind, team: b.team, cards: bundleCards, total, sold: b.sold, createdAt: b.createdAt };
+      }),
+    [bundles, cardById]
+  );
+  const activeBundleListings = useMemo(
+    () => bundleListings.filter((b) => !b.sold).sort((a, b) => b.createdAt - a.createdAt),
+    [bundleListings]
+  );
+  const soldBundleListings = useMemo(
+    () => bundleListings.filter((b) => b.sold).sort((a, b) => b.createdAt - a.createdAt),
+    [bundleListings]
+  );
+
+  // "available" is what's actually eligible for a NEW suggested pack: not on Kaleb's own
+  // Stars/checklist (already filtered out before "cards" ever reaches this component), not
+  // already sold, not waiting on review, and not already locked into an existing bundle -- so
+  // scanning in a few hundred new cards never reshuffles a bundle Kaleb's already physically made.
+  const available = useMemo(
+    () => cards.filter((c) => !c.sold && !c.needsReview && !bundledIds.has(c.id)),
+    [cards, bundledIds]
+  );
+  const individualSoldCards = useMemo(() => cards.filter((c) => c.sold && !bundledIds.has(c.id)), [cards, bundledIds]);
+
+  const { listings, finalLeftover } = useMemo(
+    () => buildSellerListings(available, safeBundleSize),
+    [available, safeBundleSize]
+  );
+
+  function copyListing(listing, key) {
+    try {
+      navigator.clipboard.writeText(buildListingCopyText(listing, safeDiscount));
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
+    } catch (e) {
+      // Clipboard access can be blocked in some contexts -- the listing text is still fully
+      // visible on screen either way, so this is a convenience, not something the feature depends on.
+    }
+  }
+
+  const individualSoldTotal = individualSoldCards.reduce((s, c) => s + (Number(c.value) || 0), 0);
+  const soldBundleCardCount = soldBundleListings.reduce((s, b) => s + b.cards.length, 0);
+  const soldBundleTotal = soldBundleListings.reduce((s, b) => s + b.total, 0);
+
+  if (available.length === 0 && bundleListings.length === 0 && individualSoldCards.length === 0) {
+    return (
+      <div className="empty-state">
+        <p>Nothing to sell right now. Cards on your Dallas Stars/North Stars checklist and the Young Guns checklist are never included here -- once you've got some other teams' cards scanned in, suggested packs will show up on this tab.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="seller-panel">
+      <p className="seller-note">
+        Cards on your Dallas Stars/North Stars checklist or the Young Guns checklist are left out of everything below -- those aren't for sale.
+      </p>
+
+      <div className="controls seller-controls">
+        <label className="seller-size-label">
+          Pack size
+          <input type="number" min="1" value={bundleSize} onChange={(e) => setBundleSize(e.target.value)} />
+          cards
+        </label>
+        <label className="seller-discount-label">
+          Discount off book value
+          <input type="range" min="0" max="90" value={discountPct} onChange={(e) => setDiscountPct(e.target.value)} />
+          <span className="seller-discount-value">{safeDiscount}%</span>
+        </label>
+      </div>
+
+      {activeBundleListings.length > 0 && (
+        <div className="seller-section">
+          <h3 className="seller-section-heading">Your bundles ({activeBundleListings.length})</h3>
+          {activeBundleListings.map((listing) => {
+            const key = `bundle-${listing.id}`;
+            const suggested = listing.total * (1 - safeDiscount / 100);
+            return (
+              <div className="seller-bundle-card" key={key}>
+                <div className="seller-listing-title">
+                  <span>{suggestedListingTitle(listing)}</span>
+                  <span className="seller-status-pill seller-status-bundled">Bundled</span>
+                </div>
+                <div className="seller-bundle-header">
+                  <div className="seller-price-block">
+                    <div className="seller-bundle-value">{money(suggested)}</div>
+                    <div className="tile-sub">book {money(listing.total)}</div>
+                  </div>
+                  <div className="seller-bundle-actions">
+                    <button type="button" className="link-btn" onClick={() => copyListing(listing, key)}>
+                      {copiedKey === key ? "Copied!" : "Copy listing"}
+                    </button>
+                    <button type="button" className="link-btn" onClick={() => onDissolveBundle(listing.id)}>Un-bundle</button>
+                    <button type="button" className="btn-secondary" onClick={() => onMarkBundleSold(listing.id)}>Mark sold</button>
+                  </div>
+                </div>
+                {listing.kind === "mixed" && (
+                  <div className="seller-mixed-breakdown">
+                    {listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}
+                  </div>
+                )}
+                <ul className="seller-bundle-list">
+                  {listing.cards.map((c) => (
+                    <li key={c.id} onClick={() => onOpenDetail(c)}>
+                      <span className="seller-bundle-player">{c.player}</span>
+                      <span className="tile-sub">
+                        {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
+                        {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
+                      </span>
+                      <span className="value-cell">{moneyOrDash(c.value)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="seller-section">
+        <h3 className="seller-section-heading">Suggested listings</h3>
+        {listings.length === 0 ? (
+          <p className="checklist-empty">Not enough sellable cards yet for a full pack of {safeBundleSize}.</p>
+        ) : (
+          listings.map((listing, idx) => {
+            const key = `suggested-${listing.kind}-${listing.team || "mixed"}-${idx}`;
+            const suggested = listing.total * (1 - safeDiscount / 100);
+            return (
+              <div className="seller-bundle-card" key={key}>
+                <div className="seller-listing-title">{suggestedListingTitle(listing)}</div>
+                <div className="seller-bundle-header">
+                  <div className="seller-price-block">
+                    <div className="seller-bundle-value">{money(suggested)}</div>
+                    <div className="tile-sub">book {money(listing.total)}</div>
+                  </div>
+                  <div className="seller-bundle-actions">
+                    <button type="button" className="link-btn" onClick={() => copyListing(listing, key)}>
+                      {copiedKey === key ? "Copied!" : "Copy listing"}
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => onCreateBundle(listing)}>Mark as bundled</button>
+                  </div>
+                </div>
+                {listing.kind === "mixed" && (
+                  <div className="seller-mixed-breakdown">
+                    {listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}
+                  </div>
+                )}
+                <ul className="seller-bundle-list">
+                  {listing.cards.map((c) => (
+                    <li key={c.id} onClick={() => onOpenDetail(c)}>
+                      <span className="seller-bundle-player">{c.player}</span>
+                      <span className="tile-sub">
+                        {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
+                        {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
+                      </span>
+                      <span className="value-cell">{moneyOrDash(c.value)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {finalLeftover.length > 0 && (
+        <div className="seller-leftover">
+          <h4>{finalLeftover.length} card{finalLeftover.length === 1 ? "" : "s"} not yet enough for another pack</h4>
+          <ul className="seller-bundle-list">
+            {finalLeftover.map((c) => (
+              <li key={c.id} onClick={() => onOpenDetail(c)}>
+                <span className="seller-bundle-player">{c.player}</span>
+                <span className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")} · {c.team || "Unlisted team"}</span>
+                <span className="value-cell">{moneyOrDash(c.value)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {(soldBundleListings.length > 0 || individualSoldCards.length > 0) && (
+        <div className="seller-sold-section">
+          <h3>Sold ({soldBundleCardCount + individualSoldCards.length}) — {money(soldBundleTotal + individualSoldTotal)}</h3>
+          {soldBundleListings.map((listing) => (
+            <div className="seller-sold-bundle" key={`soldbundle-${listing.id}`}>
+              <div className="seller-sold-bundle-header">
+                <strong>{suggestedListingTitle(listing)}</strong>
+                <span className="value-cell">{money(listing.total)}</span>
+                <button type="button" className="link-btn" onClick={() => onReturnBundleToGallery(listing.id)}>Return to gallery</button>
+              </div>
+              <ul className="seller-bundle-list">
+                {listing.cards.map((c) => (
+                  <li key={c.id} onClick={() => onOpenDetail(c)}>
+                    <span className="seller-bundle-player">{c.player}</span>
+                    <span className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")} · {c.team || "Unlisted team"}</span>
+                    <span className="value-cell">{moneyOrDash(c.value)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {individualSoldCards.length > 0 && (
+            <ul className="seller-bundle-list">
+              {individualSoldCards.map((c) => (
+                <li key={c.id} onClick={() => onOpenDetail(c)}>
+                  <span className="seller-bundle-player">{c.player}</span>
+                  <span className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")} · {c.team || "Unlisted team"}</span>
+                  <span className="value-cell">{moneyOrDash(c.value)}</span>
+                  <button type="button" className="link-btn" onClick={(e) => { e.stopPropagation(); onToggleSold(c.id); }}>Return to gallery</button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CardLedger() {
   const [cards, setCards] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -2012,15 +2467,30 @@ export default function CardLedger() {
   const [teamFilter, setTeamFilter] = useState("All");
   const [sortBy, setSortBy] = useState("dateAdded");
   const [viewMode, setViewMode] = useState("gallery");
-  const [activeTab, setActiveTab] = useState("collection"); // collection | checklist | yg | autoimport | appraise
+  const [activeTab, setActiveTab] = useState("collection"); // collection | review | checklist | yg | autoimport | appraise | sellers
   const [flipped, setFlipped] = useState({});
   // "Fix rotation" mode: shows both of a card's own photos on its gallery tile with a rotate
   // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
   // straightened out a click at a time without opening the full detail/edit view for each one.
   const [galleryEditMode, setGalleryEditMode] = useState(false);
+  // Which gallery tiles' actual photo turned out to be landscape (wider than tall) once loaded --
+  // detected client-side from the real image, since the app doesn't store photo dimensions. A
+  // landscape card gets a shorter image box (see .tile-img-wrap-landscape) instead of the default
+  // portrait-card box, which otherwise leaves a large empty gap above/below the photo.
+  const [landscapeCardIds, setLandscapeCardIds] = useState(() => new Set());
+  function markTileOrientation(id, isLandscape) {
+    setLandscapeCardIds((prev) => {
+      if (isLandscape === prev.has(id)) return prev;
+      const next = new Set(prev);
+      if (isLandscape) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
   const [rotatingImage, setRotatingImage] = useState(null); // `${cardId}-${face}` while a rotate is in flight
 
   const [checklistManual, setChecklistManual] = useState({});
+  const [sellerBundles, setSellerBundles] = useState([]);
   const [checklistQuery, setChecklistQuery] = useState("");
   const [checklistHideCollected, setChecklistHideCollected] = useState(false);
   const [expandedYears, setExpandedYears] = useState({});
@@ -2056,6 +2526,12 @@ export default function CardLedger() {
         if (manualResult && manualResult.value) setChecklistManual(JSON.parse(manualResult.value));
       } catch (e) {
         // manual checklist overrides are a nice-to-have; fail silently
+      }
+      try {
+        const bundlesResult = await window.storage.get(SELLER_BUNDLES_KEY, false);
+        if (bundlesResult && bundlesResult.value) setSellerBundles(JSON.parse(bundlesResult.value));
+      } catch (e) {
+        // seller bundles are a nice-to-have; fail silently
       } finally {
         setLoaded(true);
       }
@@ -2158,6 +2634,60 @@ export default function CardLedger() {
     if (next[key]) delete next[key];
     else next[key] = true;
     persistChecklistManual(next);
+  }
+
+  async function persistSellerBundles(next) {
+    setSellerBundles(next);
+    try {
+      await window.storage.set(SELLER_BUNDLES_KEY, JSON.stringify(next), false);
+    } catch (e) {
+      // best-effort; the gallery/list save error banner already covers the main storage path
+    }
+  }
+
+  // "Mark as bundled" on a suggested (still-ephemeral) Sellers listing: locks in exactly that set
+  // of card ids as a real, persisted group. From this point on those cards are excluded from
+  // every future auto-generated suggestion (see bundledCardIds/sellerEligibleCards below) even as
+  // Kaleb keeps scanning in new cards -- the whole point being that a bundle he's already
+  // physically taped/bagged together doesn't get quietly reshuffled by the next refresh.
+  function createSellerBundle(listing) {
+    const bundle = {
+      id: (Date.now() + Math.random()).toString(36),
+      kind: listing.kind,
+      team: listing.kind === "team" ? listing.team : null,
+      cardIds: listing.cards.map((c) => c.id),
+      createdAt: Date.now(),
+      sold: false,
+    };
+    persistSellerBundles([...sellerBundles, bundle]);
+  }
+
+  // Undoes a not-yet-sold bundle -- Kaleb changed his mind before actually taping it together, or
+  // wants to reshuffle it differently. Just forgets the grouping; the cards themselves are
+  // untouched and fall right back into the normal available-for-suggestion pool.
+  function dissolveSellerBundle(id) {
+    persistSellerBundles(sellerBundles.filter((b) => b.id !== id));
+  }
+
+  // A bundle that's actually sold: flip the bundle record itself AND every card in it (reusing
+  // markCardsSold so Gallery/List/the top stat strip all behave exactly like an individually
+  // sold card already does).
+  function markSellerBundleSold(id) {
+    const bundle = sellerBundles.find((b) => b.id === id);
+    if (!bundle) return;
+    persistSellerBundles(sellerBundles.map((b) => (b.id === id ? { ...b, sold: true } : b)));
+    markCardsSold(bundle.cardIds);
+  }
+
+  // Full undo of a sold bundle: dissolves the grouping entirely and un-sells every card in it, so
+  // everything lands back in the normal available pool exactly as if it had never been bundled --
+  // mirrors what "Return to gallery" already does for a single sold card.
+  function returnSellerBundleToGallery(id) {
+    const bundle = sellerBundles.find((b) => b.id === id);
+    if (!bundle) return;
+    persistSellerBundles(sellerBundles.filter((b) => b.id !== id));
+    const idSet = new Set(bundle.cardIds);
+    persist(cards.map((c) => (idSet.has(c.id) ? { ...c, sold: false } : c)));
   }
 
   function toggleYearExpanded(year) {
@@ -2370,6 +2900,25 @@ export default function CardLedger() {
   function isStarsCollectionCard(c) {
     return c.team === "Dallas Stars" || c.team === "Minnesota North Stars" || starsRelatedCardIds.has(c.id);
   }
+
+  // Round 30: the Sellers tab is only ever for cards Kaleb actually intends to sell -- anything
+  // that's part of his own Dallas Stars/North Stars checklist or the Young Guns checklist
+  // (isStarsCollectionCard, same predicate the gallery theming already uses) is excluded
+  // entirely, never counted toward a suggested pack and never up for "mark sold."
+  const sellerEligibleCards = useMemo(
+    () => cards.filter((c) => !isStarsCollectionCard(c)),
+    [cards, starsRelatedCardIds]
+  );
+
+  // Round 31: every card id that's part of ANY persisted seller bundle (bundled-not-sold or
+  // already sold) -- used to keep a locked-in bundle's cards out of every future auto-generated
+  // suggestion, and to hide the single-card "Mark sold" toggle in the detail modal for a card
+  // that's already accounted for at the bundle level.
+  const bundledCardIds = useMemo(() => {
+    const ids = new Set();
+    sellerBundles.forEach((b) => b.cardIds.forEach((id) => ids.add(id)));
+    return ids;
+  }, [sellerBundles]);
 
   // Round 25: group the currently-filtered/sorted gallery list by "same physical card" (player +
   // year + brand + set + card number) so Kaleb's duplicate copies show as one tile with an "x2"/
@@ -2739,6 +3288,30 @@ export default function CardLedger() {
     persist(cards.map((c) => (c.id === id ? { ...c, thumbnailSource: source } : c)));
   }
 
+  // Manual "flag for review" -- a card the AI identified fine but Kaleb himself isn't sure about
+  // (wrong value, questionable identification, wants a better photo, etc). Flagging pulls it out
+  // of the normal Gallery/List view (see filtered above) into the Review tab, alongside whatever
+  // Auto Import itself flagged; un-flagging sends it right back.
+  function toggleNeedsReview(id) {
+    persist(cards.map((c) => (c.id === id ? { ...c, needsReview: !c.needsReview } : c)));
+  }
+
+  // "Sold" is scoped to cards Kaleb actually sells (see sellerEligibleCards -- never his own
+  // Dallas Stars/North Stars checklist or Young Guns cards, those aren't for sale). A sold card
+  // drops out of the normal Gallery/List view (see filtered above) and out of Sellers' suggested
+  // packs, landing in the Sellers tab's own "Sold" section instead; toggling again undoes it.
+  function toggleSold(id) {
+    persist(cards.map((c) => (c.id === id ? { ...c, sold: !c.sold } : c)));
+  }
+
+  // Marks every card in a whole suggested pack sold at once, for the Sellers tab's "Mark pack
+  // sold" button -- the common case, since Kaleb lists and sells a pack as a unit, not one card
+  // at a time.
+  function markCardsSold(ids) {
+    const idSet = new Set(ids);
+    persist(cards.map((c) => (idSet.has(c.id) ? { ...c, sold: true } : c)));
+  }
+
   function toggleFlip(id) {
     setFlipped((prev) => ({ ...prev, [id]: !prev[id] }));
   }
@@ -2792,7 +3365,15 @@ export default function CardLedger() {
   }
 
   const filtered = useMemo(() => {
-    let list = cards;
+    // Cards flagged "needs review" (manually, or via Auto Import landing in the review queue)
+    // are hidden from the normal Gallery/List browsing entirely -- they live in the Review tab
+    // until dealt with. Still counted in stats/checklist progress below, since a flagged card is
+    // still a real, owned card that just needs a second look, not one that's been removed.
+    // Sold cards (round 30) are hidden the same way -- once sold it's no longer part of the
+    // active collection to browse -- but unlike needsReview, sold cards are also left out of the
+    // stats strip below, since "cards in the collection" / "estimated value" should reflect what
+    // Kaleb actually still owns.
+    let list = cards.filter((c) => !c.needsReview && !c.sold);
     if (sportFilter !== "All") list = list.filter((c) => c.sport === sportFilter);
     if (brandFilter !== "All") list = list.filter((c) => (c.brand || "") === brandFilter);
     if (teamFilter !== "All") list = list.filter((c) => (c.team || "") === teamFilter);
@@ -2859,8 +3440,9 @@ export default function CardLedger() {
   }, [filtered]);
 
   const stats = useMemo(() => {
-    const totalValue = cards.reduce((s, c) => s + (Number(c.value) || 0), 0);
-    return { totalCards: cards.length, totalValue };
+    const active = cards.filter((c) => !c.sold);
+    const totalValue = active.reduce((s, c) => s + (Number(c.value) || 0), 0);
+    return { totalCards: active.length, totalValue };
   }, [cards]);
 
   // Subtotal for whatever's currently on screen after search/sport/brand/team filters --
@@ -3006,11 +3588,49 @@ export default function CardLedger() {
         .auto-import-progress-track { width: 100%; height: 6px; border-radius: 3px; background: #EDE7D6; overflow: hidden; }
         .auto-import-progress-fill { height: 100%; background: var(--green); }
         .auto-import-review-card { border: 1px solid var(--paper-line); border-radius: 4px; padding: 12px 14px; background: #fff; margin-bottom: 14px; max-width: 640px; }
+        .review-flagged-card .photo-pair-row { gap: 12px; align-items: flex-start; }
+        .review-flagged-card .tile-value { color: var(--green); }
         .review-thumb { width: 100%; aspect-ratio: 5/7; object-fit: contain; background: #EDE7D6; border-radius: 2px; cursor: zoom-in; }
         .review-thumb-label { display: block; text-align: center; font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.03em; text-transform: uppercase; }
         .review-replace-link { display: block; text-align: center; font-size: 12px; color: var(--gold); text-decoration: underline; cursor: pointer; margin-top: 2px; }
         .verify-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
         .verify-fields input, .verify-fields select { font-family: inherit; font-size: 13.5px; padding: 6px 8px; border: 1px solid var(--paper-line); background: #fff; border-radius: 3px; color: var(--ink); }
+
+        .seller-note { font-size: 13px; color: var(--muted); font-style: italic; font-family: Georgia, serif; margin: 0 0 16px; }
+        .seller-controls { margin-bottom: 22px; }
+        .seller-size-label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+        .seller-size-label input[type="number"] { width: 64px; font-family: inherit; font-size: 14px; padding: 7px 8px; border: 1px solid var(--paper-line); background: #fff; border-radius: 3px; color: var(--ink); }
+        .seller-discount-label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+        .seller-discount-label input[type="range"] { width: 130px; }
+        .seller-discount-value { font-family: Georgia, serif; font-weight: 700; color: var(--navy); width: 34px; }
+        .seller-section { margin-bottom: 30px; }
+        .seller-section-heading { font-family: Georgia, serif; color: var(--navy); font-size: 17px; margin: 0 0 12px; }
+        .seller-bundle-card { border: 1px solid var(--paper-line); border-radius: 4px; background: #fff; margin-bottom: 16px; max-width: 620px; overflow: hidden; }
+        .seller-listing-title { display: flex; align-items: center; gap: 8px; font-family: Georgia, serif; font-weight: 700; color: var(--navy); font-size: 15px; padding: 12px 14px 0; }
+        .seller-status-pill { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 10px; padding: 2px 9px; }
+        .seller-status-bundled { color: var(--gold); border: 1px solid var(--gold); }
+        .seller-bundle-header { display: flex; align-items: center; gap: 14px; padding: 8px 14px 10px; border-bottom: 1px solid var(--paper-line); flex-wrap: wrap; }
+        .seller-price-block { display: flex; flex-direction: column; }
+        .seller-bundle-value { font-family: Georgia, serif; font-weight: 700; color: var(--green); font-size: 17px; }
+        .seller-bundle-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+        .seller-mixed-breakdown { font-size: 12px; color: var(--muted); padding: 8px 14px 0; }
+        .seller-bundle-list { list-style: none; margin: 0; padding: 4px 14px; }
+        .seller-bundle-list li { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--paper-line); cursor: pointer; }
+        .seller-bundle-list li:last-child { border-bottom: none; }
+        .seller-bundle-list li:hover .seller-bundle-player { text-decoration: underline; color: var(--navy); }
+        .seller-bundle-player { font-weight: 600; font-size: 13.5px; }
+        .seller-bundle-list .value-cell { margin-left: auto; flex-shrink: 0; }
+        .seller-leftover { margin-top: 6px; margin-bottom: 20px; max-width: 620px; }
+        .seller-leftover h4 { font-size: 13.5px; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+        .seller-leftover .seller-bundle-list { border: 1px dashed var(--paper-line); border-radius: 4px; padding: 4px 14px; }
+        .seller-sold-section { margin-top: 30px; border-top: 1px solid var(--paper-line); padding-top: 18px; max-width: 620px; }
+        .seller-sold-section h3 { font-family: Georgia, serif; color: var(--navy); font-size: 17px; margin: 0 0 10px; }
+        .seller-sold-section .seller-bundle-list { border: 1px solid var(--paper-line); border-radius: 4px; background: #fff; }
+        .seller-sold-section .seller-bundle-list .link-btn { margin-left: 10px; flex-shrink: 0; }
+        .seller-sold-bundle { border: 1px solid var(--paper-line); border-radius: 4px; background: #fff; margin-bottom: 10px; overflow: hidden; }
+        .seller-sold-bundle-header { display: flex; align-items: center; gap: 12px; padding: 9px 14px; background: #F7F4EA; border-bottom: 1px solid var(--paper-line); font-size: 13.5px; }
+        .seller-sold-bundle-header .value-cell { margin-left: auto; }
+        .seller-sold-bundle .seller-bundle-list { border: none; }
 
         .banner-good { border-color: var(--green); color: var(--green); background: #EAF1EC; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .banner-dismiss { background: none; border: none; color: inherit; text-decoration: underline; cursor: pointer; font-family: inherit; font-size: 12.5px; flex-shrink: 0; }
@@ -3062,7 +3682,7 @@ export default function CardLedger() {
         .thumb-cell img, .thumb-cell .img-fallback { width: 100%; height: 100%; object-fit: contain; }
         .player-cell { font-weight: 600; }
         .sub-cell { color: var(--muted); font-size: 12.5px; }
-        .value-cell { font-family: Georgia, serif; font-weight: 700; color: var(--card-team-primary, var(--team-primary)); }
+        .value-cell { font-family: Georgia, serif; font-weight: 700; color: var(--green); }
 
         .empty-state { padding: 56px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--paper-line); }
         .empty-state p { margin: 0 0 16px; font-size: 15px; }
@@ -3077,6 +3697,13 @@ export default function CardLedger() {
         .tile:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,0.14); }
         .tile-img-wrap { position: relative; aspect-ratio: 5 / 7; background: #EDE7D6; }
         .tile-img-wrap img, .img-fallback { width: 100%; height: 100%; object-fit: contain; display: flex; align-items: center; justify-content: center; }
+        /* A landscape (wider-than-tall) photo left a big empty gap in the default portrait-shaped
+           box -- detected client-side once the image loads (see markTileOrientation) and swapped
+           to a landscape-shaped box instead, which the image fills properly with object-fit:
+           contain instead of floating in a mostly-empty tall rectangle. */
+        .tile-img-wrap-landscape { aspect-ratio: 7 / 5; }
+        .tile-flag-btn { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 50%; font-size: 12px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+        .tile-flag-btn:hover { background: rgba(140,59,46,0.9); }
         .img-fallback { color: var(--muted); font-family: Georgia, serif; font-style: italic; font-size: 13px; text-align: center; padding: 10px; }
         .tile-flip-btn { position: absolute; top: 6px; right: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 7px; font-size: 11px; cursor: pointer; font-family: inherit; }
         .tile-rotate-btn { position: absolute; top: 6px; left: 6px; background: rgba(30,52,72,0.75); color: #fff; border: none; border-radius: 3px; padding: 3px 8px; font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit; }
@@ -3087,7 +3714,7 @@ export default function CardLedger() {
         .tile-dupe-badge { position: absolute; right: 9px; bottom: 10px; font-size: 11.5px; font-weight: 700; color: var(--muted); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
         .tile-player { font-weight: 600; font-size: 13.5px; line-height: 1.25; }
         .tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-        .tile-value { font-family: Georgia, serif; font-weight: 700; color: var(--card-team-primary, var(--team-primary)); font-size: 13px; margin-top: 4px; }
+        .tile-value { font-family: Georgia, serif; font-weight: 700; color: var(--green); font-size: 13px; margin-top: 4px; }
         .tile-editmode { cursor: default; }
         .tile-rotate-row { display: flex; }
         .tile-rotate-col { flex: 1; min-width: 0; }
@@ -3178,8 +3805,9 @@ export default function CardLedger() {
         .source-toggle button { background: #fff; border: none; padding: 7px 14px; font-size: 12.5px; cursor: pointer; font-family: inherit; color: var(--muted); }
         .source-toggle button.active { background: var(--gold); color: #fff; }
 
-        .form-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 20px; }
+        .form-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
         .form-actions-right { display: flex; gap: 10px; }
+        .form-actions-left { display: flex; gap: 10px; }
         .btn-secondary { background: none; border: 1px solid var(--paper-line); padding: 9px 16px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 14px; color: var(--ink); }
         .btn-danger { background: none; border: none; color: var(--brick); text-decoration: underline; cursor: pointer; font-family: inherit; font-size: 13.5px; }
         .btn-primary { background: var(--navy); color: var(--paper); border: none; padding: 9px 18px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 600; }
@@ -3218,10 +3846,14 @@ export default function CardLedger() {
 
         <div className="tab-bar">
           <button className={activeTab === "collection" ? "active" : ""} onClick={() => setActiveTab("collection")}>Gallery</button>
+          <button className={activeTab === "review" ? "active" : ""} onClick={() => setActiveTab("review")}>
+            Review{cards.some((c) => c.needsReview) ? ` (${cards.filter((c) => c.needsReview).length})` : ""}
+          </button>
           <button className={activeTab === "checklist" ? "active" : ""} onClick={() => setActiveTab("checklist")}>Stars Checklist</button>
           <button className={activeTab === "yg" ? "active" : ""} onClick={() => setActiveTab("yg")}>Young Guns</button>
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
           <button className={activeTab === "appraise" ? "active" : ""} onClick={() => setActiveTab("appraise")}>Appraise</button>
+          <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Sellers</button>
         </div>
 
         {loadError && <div className="banner">Couldn't load your saved collection. Starting from an empty ledger — anything you add now will still be saved going forward.</div>}
@@ -3449,10 +4081,29 @@ export default function CardLedger() {
               ))
             )}
           </div>
+        ) : activeTab === "review" ? (
+          <ReviewPanel
+            flaggedCards={cards.filter((c) => c.needsReview)}
+            onToggleNeedsReview={toggleNeedsReview}
+            onOpenDetail={openDetail}
+            onCardsMayHaveChanged={reloadCardsFromStorage}
+            getDisplay={getDisplay}
+          />
         ) : activeTab === "autoimport" ? (
           <AutoImportPanel onCardsMayHaveChanged={reloadCardsFromStorage} />
         ) : activeTab === "appraise" ? (
           <AppraisePanel onQuickAdd={quickAddFromAppraisal} />
+        ) : activeTab === "sellers" ? (
+          <SellerPanel
+            cards={sellerEligibleCards}
+            bundles={sellerBundles}
+            onOpenDetail={openDetail}
+            onCreateBundle={createSellerBundle}
+            onDissolveBundle={dissolveSellerBundle}
+            onMarkBundleSold={markSellerBundleSold}
+            onReturnBundleToGallery={returnSellerBundleToGallery}
+            onToggleSold={toggleSold}
+          />
         ) : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
         ) : filtered.length === 0 ? (
@@ -3527,8 +4178,16 @@ export default function CardLedger() {
               const cardThemeStyle = cardTheme ? { "--card-team-primary": cardTheme.primary } : undefined;
               return (
                 <div className="tile" key={key} style={cardThemeStyle} onClick={() => openDetail(c)}>
-                  <div className="tile-img-wrap">
-                    <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                  <div className={landscapeCardIds.has(c.id) ? "tile-img-wrap tile-img-wrap-landscape" : "tile-img-wrap"}>
+                    <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" onOrientation={(isLandscape) => markTileOrientation(c.id, isLandscape)} />
+                    <button
+                      type="button"
+                      className="tile-flag-btn"
+                      onClick={(e) => { e.stopPropagation(); toggleNeedsReview(c.id); }}
+                      title="Flag for review"
+                    >
+                      ⚑
+                    </button>
                     {hasBoth && (
                       <div className="tile-source-toggle">
                         <button className={c.thumbnailSource !== "personal" ? "active" : ""} onClick={(e) => { e.stopPropagation(); setThumbnailSource(c.id, "online"); }}>Online</button>
@@ -3700,7 +4359,27 @@ export default function CardLedger() {
               </div>
 
               <div className="form-actions">
-                <span />
+                <div className="form-actions-left">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => { toggleNeedsReview(detailCard.id); setDetailCard({ ...detailCard, needsReview: !detailCard.needsReview }); }}
+                  >
+                    {detailCard.needsReview ? "Remove from review" : "Flag for review"}
+                  </button>
+                  {/* Hidden for a card that's part of a persisted seller bundle (round 31) -- that
+                      card's sold/not-sold state is managed at the bundle level from the Sellers
+                      tab instead, so this toggle only ever applies to an un-bundled single card. */}
+                  {!isStarsCollectionCard(detailCard) && !bundledCardIds.has(detailCard.id) && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => { toggleSold(detailCard.id); setDetailCard({ ...detailCard, sold: !detailCard.sold }); }}
+                    >
+                      {detailCard.sold ? "Return to gallery" : "Mark sold"}
+                    </button>
+                  )}
+                </div>
                 <div className="form-actions-right">
                   <button type="button" className="btn-secondary" onClick={closeDetail}>Close</button>
                   <button type="button" className="btn-primary" onClick={() => { closeDetail(); openEditForm(detailCard); }}>Edit</button>

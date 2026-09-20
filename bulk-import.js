@@ -500,6 +500,18 @@ module.exports = function registerBulkImport(app, db, opts) {
   // ticks its way to "done" successfully shouldn't keep showing a "fetch failed" banner forever
   // just because updateJobStatus never used to touch that column.
   const markJobDone = db.prepare(`UPDATE bulk_jobs SET status='done', error_message=NULL, updated_at=? WHERE id=?`);
+  // Used by the "Retry" button on an errored job (see the /jobs/:id/retry route below). tickJob's
+  // catch block (further down) flips a job's status straight to 'error' the moment ANY exception
+  // escapes it -- a network hiccup talking to the Anthropic API, a batch lookup failing, running
+  // out of API credit, anything -- and tickAllJobs only ever re-ticks jobs whose status is still
+  // 'processing'. That means an errored job is otherwise stuck forever: adding credit back to the
+  // Anthropic account, or even restarting the whole container, does nothing on its own, because
+  // neither one touches this job's status in the database. This just puts it back to 'processing'
+  // and clears the stale error message so the next 45-second tick (or the one 5 seconds after a
+  // restart) picks it back up and carries on from whatever items were already left mid-flight --
+  // nothing about the job's items/batches themselves needs touching, since tickJob always resumes
+  // by re-checking each item's CURRENT status, not by starting the job over from scratch.
+  const retryJob = db.prepare(`UPDATE bulk_jobs SET status='processing', error_message=NULL, updated_at=? WHERE id=?`);
   const bumpJobCounts = db.prepare(
     `UPDATE bulk_jobs SET auto_added = auto_added + ?, needs_review = needs_review + ?, cost_usd = cost_usd + ?, updated_at=? WHERE id=?`
   );
@@ -668,6 +680,19 @@ module.exports = function registerBulkImport(app, db, opts) {
     const job = getJob.get(req.params.id);
     if (!job) return res.status(404).json({ error: { message: "job not found" } });
     res.json({ job });
+  });
+
+  // Resume a job that got knocked into 'error' status -- most commonly because the Anthropic
+  // account ran out of API credit mid-run. tickAllJobs() only ever re-ticks jobs whose status is
+  // 'processing', so an errored job sits stuck forever until something puts it back there. This
+  // just flips the status and clears the stale error message; tickJob() resumes each item from
+  // wherever it left off (it never restarts a job from scratch), so the next 45-second tick (or
+  // the one 5 seconds after a restart) picks this job back up automatically.
+  app.post("/api/bulk-import/jobs/:id/retry", (req, res) => {
+    const job = getJob.get(req.params.id);
+    if (!job) return res.status(404).json({ error: { message: "job not found" } });
+    retryJob.run(new Date().toISOString(), job.id);
+    res.json({ ok: true });
   });
 
   app.get("/api/bulk-import/review", (req, res) => {
