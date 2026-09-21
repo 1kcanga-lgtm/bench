@@ -1311,7 +1311,28 @@ function ChecklistYearSection({
 
 function CardImage({ src, alt, fallbackLabel, onOrientation }) {
   const [errored, setErrored] = useState(false);
+  const imgRef = useRef(null);
   useEffect(() => setErrored(false), [src]);
+
+  // Round 33: a cached image -- the exact same URL already loaded elsewhere on the page, or
+  // already sitting in the browser's own HTTP cache from an earlier visit -- can finish loading
+  // before React ever attaches the onLoad handler below; some browsers then never fire a `load`
+  // event for it at all. When that happens, onOrientation never runs, the tile silently stays
+  // classified as portrait regardless of the photo's real shape, and a landscape photo ends up
+  // floating in the default portrait-shaped box (object-fit: contain inside a 5:7 box) with a
+  // big empty gap above and below it -- matches Kaleb's "big white box" report. This effect
+  // catches that case by checking the image's own `.complete`/naturalWidth right after mount
+  // (and again whenever `src` changes), so orientation still gets reported even when the onLoad
+  // event itself never fires. Calling onOrientation from both this effect and onLoad below is
+  // harmless -- markTileOrientation no-ops if the classification hasn't actually changed.
+  useEffect(() => {
+    if (!onOrientation) return;
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      onOrientation(img.naturalWidth > img.naturalHeight);
+    }
+  }, [src, onOrientation]);
+
   if (!src || errored) {
     return (
       <div className="img-fallback">
@@ -1321,6 +1342,7 @@ function CardImage({ src, alt, fallbackLabel, onOrientation }) {
   }
   return (
     <img
+      ref={imgRef}
       src={src}
       alt={alt}
       onError={() => setErrored(true)}
@@ -2467,7 +2489,13 @@ export default function CardLedger() {
   const [teamFilter, setTeamFilter] = useState("All");
   const [sortBy, setSortBy] = useState("dateAdded");
   const [viewMode, setViewMode] = useState("gallery");
-  const [activeTab, setActiveTab] = useState("collection"); // collection | review | checklist | yg | autoimport | appraise | sellers
+  // Round 33: split the old single "Gallery" tab into two -- "home" (new default landing tab,
+  // Dallas Stars/North Stars cards only) and "collection" (unchanged key/behavior, now labeled
+  // "Gallery" in the tab bar, showing every card regardless of team). Both reuse the exact same
+  // search/sort/filter/gallery-list/fix-rotation UI block below, just scoped to a different pool
+  // of cards -- see homeCards/the `activeTab === "home" ? homeCards : cards` branches in
+  // `filtered`/`usedTeams`/`usedBrands`.
+  const [activeTab, setActiveTab] = useState("home"); // home | collection | review | checklist | yg | autoimport | appraise | sellers
   const [flipped, setFlipped] = useState({});
   // "Fix rotation" mode: shows both of a card's own photos on its gallery tile with a rotate
   // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
@@ -2907,6 +2935,15 @@ export default function CardLedger() {
   // entirely, never counted toward a suggested pack and never up for "mark sold."
   const sellerEligibleCards = useMemo(
     () => cards.filter((c) => !isStarsCollectionCard(c)),
+    [cards, starsRelatedCardIds]
+  );
+
+  // Round 33: the "Home" tab's card pool -- the exact same predicate as isStarsCollectionCard
+  // above (and Sellers' exclusion, just inverted), so "Stars collection" means the same thing
+  // everywhere in the app: printed Dallas Stars/Minnesota North Stars, or a tracked Stars-alumnus
+  // Young Guns card regardless of what team is actually printed on it.
+  const homeCards = useMemo(
+    () => cards.filter((c) => isStarsCollectionCard(c)),
     [cards, starsRelatedCardIds]
   );
 
@@ -3373,19 +3410,31 @@ export default function CardLedger() {
     // active collection to browse -- but unlike needsReview, sold cards are also left out of the
     // stats strip below, since "cards in the collection" / "estimated value" should reflect what
     // Kaleb actually still owns.
-    let list = cards.filter((c) => !c.needsReview && !c.sold);
+    // Round 33: "Home" browses only the Stars/North Stars pool, "Gallery" (the old single tab,
+    // key unchanged) browses everything -- see homeCards above.
+    const basePool = activeTab === "home" ? homeCards : cards;
+    let list = basePool.filter((c) => !c.needsReview && !c.sold);
     if (sportFilter !== "All") list = list.filter((c) => c.sport === sportFilter);
     if (brandFilter !== "All") list = list.filter((c) => (c.brand || "") === brandFilter);
     if (teamFilter !== "All") list = list.filter((c) => (c.team || "") === teamFilter);
     if (query.trim()) {
       const q = query.trim().toLowerCase();
+      // Round 33 bug fix: these used to assume player/team/set/year were always non-empty
+      // strings. A card missing one of those fields (e.g. an incompletely-identified Auto Import
+      // card) made `.toLowerCase()` throw the moment a search that didn't already match on
+      // `player` alone reached it -- since `||` short-circuits, this only ever surfaced once the
+      // player-name check failed to match first, which is exactly what made it look like it came
+      // out of nowhere. This was a real, reproducible whole-app crash (confirmed via a disposable
+      // preview build with a card seeded with an undefined `team` field), not just a hunch --
+      // matches Kaleb's "gallery crashes" report. Every field now falls back to "" like `brand`
+      // already did.
       list = list.filter(
         (c) =>
-          c.player.toLowerCase().includes(q) ||
-          c.team.toLowerCase().includes(q) ||
+          (c.player || "").toLowerCase().includes(q) ||
+          (c.team || "").toLowerCase().includes(q) ||
           (c.brand || "").toLowerCase().includes(q) ||
-          c.set.toLowerCase().includes(q) ||
-          c.year.toLowerCase().includes(q)
+          (c.set || "").toLowerCase().includes(q) ||
+          (c.year || "").toLowerCase().includes(q)
       );
     }
     const sorted = [...list];
@@ -3409,7 +3458,7 @@ export default function CardLedger() {
         sorted.sort((a, b) => b.dateAdded - a.dateAdded);
     }
     return sorted;
-  }, [cards, query, sportFilter, brandFilter, teamFilter, sortBy]);
+  }, [cards, homeCards, activeTab, query, sportFilter, brandFilter, teamFilter, sortBy]);
 
   // Round 25: group the currently-filtered/sorted gallery list by "same physical card" (player +
   // year + brand + set + card number) so Kaleb's duplicate copies show as one tile with an "x2"/
@@ -3457,9 +3506,10 @@ export default function CardLedger() {
   // alphabetically, same pattern as usedBrands below.
   const usedTeams = useMemo(() => {
     const seen = new Set();
-    cards.forEach((c) => { if (c.team) seen.add(c.team); });
+    const pool = activeTab === "home" ? homeCards : cards;
+    pool.forEach((c) => { if (c.team) seen.add(c.team); });
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
-  }, [cards]);
+  }, [cards, homeCards, activeTab]);
 
   // Active team-color theme for the Collection tab, only while a specific team is filtered in
   // (Kaleb's call -- not an app-wide re-theme). Falls back to null (the app's normal look) for
@@ -3480,9 +3530,10 @@ export default function CardLedger() {
 
   const usedBrands = useMemo(() => {
     const seen = new Set();
-    cards.forEach((c) => { if (c.brand) seen.add(c.brand); });
+    const pool = activeTab === "home" ? homeCards : cards;
+    pool.forEach((c) => { if (c.brand) seen.add(c.brand); });
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
-  }, [cards]);
+  }, [cards, homeCards, activeTab]);
 
   return (
     <div
@@ -3845,7 +3896,30 @@ export default function CardLedger() {
         </div>
 
         <div className="tab-bar">
-          <button className={activeTab === "collection" ? "active" : ""} onClick={() => setActiveTab("collection")}>Gallery</button>
+          <button
+            className={activeTab === "home" ? "active" : ""}
+            onClick={() => {
+              // Switching between Home and the full Gallery resets the team/brand filters (round
+              // 33) -- otherwise a team filter picked while browsing the full database could carry
+              // over and make Home look empty ("nothing matches") the moment it lands on a team
+              // that isn't Dallas Stars/Minnesota North Stars.
+              setTeamFilter("All");
+              setBrandFilter("All");
+              setActiveTab("home");
+            }}
+          >
+            Home
+          </button>
+          <button
+            className={activeTab === "collection" ? "active" : ""}
+            onClick={() => {
+              setTeamFilter("All");
+              setBrandFilter("All");
+              setActiveTab("collection");
+            }}
+          >
+            Gallery
+          </button>
           <button className={activeTab === "review" ? "active" : ""} onClick={() => setActiveTab("review")}>
             Review{cards.some((c) => c.needsReview) ? ` (${cards.filter((c) => c.needsReview).length})` : ""}
           </button>
@@ -3935,9 +4009,14 @@ export default function CardLedger() {
           </div>
         )}
 
-        {activeTab === "collection" && (
+        {(activeTab === "collection" || activeTab === "home") && (
           <div className="controls">
-            <input type="text" placeholder="Search player, team, brand, set, or year" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input
+              type="text"
+              placeholder={activeTab === "home" ? "Search your Stars cards by player, brand, set, or year" : "Search player, team, brand, set, or year"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             <select value={sportFilter} onChange={(e) => setSportFilter(e.target.value)}>
               <option value="All">All sports</option>
               {SPORTS.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -3983,7 +4062,7 @@ export default function CardLedger() {
           </div>
         )}
 
-        {activeTab === "collection" && teamFilter !== "All" && (
+        {(activeTab === "collection" || activeTab === "home") && teamFilter !== "All" && (
           <div className="team-subtotal">
             <strong>{teamFilter}</strong>: {filteredStats.totalCards} card{filteredStats.totalCards === 1 ? "" : "s"} · {money(filteredStats.totalValue)} estimated value
           </div>
