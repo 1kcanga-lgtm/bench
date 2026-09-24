@@ -3738,7 +3738,16 @@ export default function CardLedger() {
         .empty-state { padding: 56px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--paper-line); }
         .empty-state p { margin: 0 0 16px; font-size: 15px; }
 
-        .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
+        /* align-items (round 34, tuned round 35) -- without an explicit value, CSS Grid's default
+           "stretch" makes every tile in a row match the height of the TALLEST tile in that row. A
+           landscape tile's own image box correctly shrinks (see .tile-img-wrap-landscape below),
+           but the surrounding .tile itself was still being stretched to match its taller portrait
+           neighbors, leaving the now-correctly-sized image pinned at the top with a big empty gap
+           below it. Round 34 fixed that with align-items: start, which stopped the stretch but
+           left every shorter tile pinned to the TOP of its row -- round 35 switches to "center" so
+           a landscape tile instead sits centered against its taller portrait neighbors, per
+           Kaleb's request. */
+        .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; align-items: center; }
         .tile {
           border: 1px solid var(--paper-line); border-top: 4px solid var(--card-team-primary, var(--team-primary));
           background: #fff; border-radius: 6px; overflow: hidden; cursor: pointer;
