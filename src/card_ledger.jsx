@@ -1042,83 +1042,6 @@ Respond with ONLY a raw JSON object, no markdown fences, no commentary, in exact
   return JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
 }
 
-// --- Appraise: identify several cards from a single photo, for a quick on-the-spot value check ---
-
-const APPRAISE_PROMPT = `You are looking at a single photo that may contain SEVERAL different sports trading cards laid out together (for example, cards someone is deciding whether to buy at a card show).
-
-1. Identify EVERY individual card visible in the photo, left-to-right and top-to-bottom -- including ones that are partially obscured, small, or hard to read. Include a row for each card you can distinguish rather than skipping it. For each one, read player name, team, sport, year, card number, the manufacturer/brand (e.g. "Upper Deck", "Topps", "Panini"), and the specific set/subset name separately from the brand, as best you can from this one photo of the front.
-2. For each card, give a ROUGH current market value in USD as a plain number, based on your general knowledge of the hobby -- this is a quick on-the-spot ballpark, not a live-market lookup, and the app tells the person that. Use null only if you genuinely have no basis to even guess.
-3. Leave "frontImageUrl" as null -- there's no search here to find one from.
-4. Rate your confidence per card as "high", "medium", or "low". A card you're unsure about still gets a row with confidence "low" and your best guess at each field -- never leave a visible card out because you're not fully sure what it is.
-
-You MUST always respond with the JSON object below and nothing else -- never an apology, a refusal, or a request for a clearer photo. Only return an empty "cards" array if you genuinely cannot make out any card-shaped objects at all; if you can see cards, describe them as best you can even under uncertainty.
-
-Respond with ONLY a raw JSON object, no markdown fences, no commentary, in exactly this shape:
-{"cards":[{"player":"","team":"","sport":"","year":"","brand":"","set":"","cardNumber":"","estimatedValue":null,"frontImageUrl":null,"confidence":""}]}
-
-"sport" must be one of: Baseball, Basketball, Football, Hockey, Soccer, Other.`;
-
-async function callAppraiseOnce(dataUrl) {
-  await waitForSharedCooldown();
-  const toBase64 = (d) => d.slice(d.indexOf(",") + 1);
-  const content = [
-    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: toBase64(dataUrl) } },
-    { type: "text", text: APPRAISE_PROMPT },
-  ];
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL_ID,
-      // No web_search tool here on purpose: searching live for every card in a 9+ card photo
-      // in one turn was blowing the response budget and coming back truncated/unparseable --
-      // that's almost certainly why whole batches were failing or only the first card or two
-      // came back. A pure-vision, general-knowledge estimate is far more reliable for "give me
-      // a rough number on all of these right now"; a precise, sourced value is one tap away
-      // per-card once something's actually added to the ledger (that flow does search live).
-      max_tokens: 4000,
-      // See callIdentifyOnce's no-search branch: claude-sonnet-5 runs adaptive thinking by
-      // default unless told otherwise, and this is a one-shot vision extraction with no search
-      // or multi-step reasoning involved -- turn it off.
-      thinking: { type: "disabled" },
-      messages: [{ role: "user", content }],
-    }),
-  });
-  const data = await response.json();
-  addToLifetimeCost(estimateCallCostUsd(MODEL_ID, data));
-  if (data.error) {
-    const { isRateLimit, isBilling, message } = classifyApiError(response, data);
-    const err = new Error(message);
-    err.isRateLimit = isRateLimit;
-    err.isBilling = isBilling;
-    if (isRateLimit) noteRateLimitHit();
-    throw err;
-  }
-  const text = (data.content || [])
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .filter(Boolean)
-    .join("\n");
-  const clean = text.replace(/```json|```/g, "").trim();
-  const jsonStart = clean.indexOf("{");
-  const jsonEnd = clean.lastIndexOf("}");
-  if (jsonStart === -1 || jsonEnd === -1) throw new Error("no JSON in response");
-  const parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
-  return Array.isArray(parsed.cards) ? parsed.cards : [];
-}
-
-async function appraiseMultipleCards(dataUrl) {
-  let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      return await callAppraiseOnce(dataUrl);
-    } catch (err) {
-      lastErr = err;
-      if (attempt < 2) await wait(err.isRateLimit ? 5000 : 1200);
-    }
-  }
-  throw lastErr;
-}
-
 // --- Phone photo vs. scan detection ------------------------------------
 // Reads just enough JPEG/EXIF to tell a phone or camera photo (which embeds a
 // Make/Model, e.g. "Google" / "Pixel 9") apart from a flatbed scan (which
@@ -2000,123 +1923,6 @@ function ReviewPanel({ flaggedCards, onToggleNeedsReview, onOpenDetail, onCardsM
   );
 }
 
-// --- Appraise: one photo of several cards at once, for a rough on-the-spot value check
-// (e.g. deciding what to buy at a card show). Never saved automatically. ---
-function AppraisePanel({ onQuickAdd }) {
-  const [photoFile, setPhotoFile] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [results, setResults] = useState(null);
-  const [addedIndices, setAddedIndices] = useState({});
-
-  async function handlePhotoChosen(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    setError(null);
-    setResults(null);
-    setAddedIndices({});
-    setPhotoFile(file);
-    try {
-      const dataUrl = await fileToResizedDataUrl(file, 640, 0.8);
-      setPreview(dataUrl);
-    } catch (e2) {
-      setPreview(null);
-    }
-  }
-
-  async function runAppraise() {
-    if (!photoFile) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const hiRes = await fileToResizedDataUrl(photoFile, 2000, 0.9);
-      const cards = await appraiseMultipleCards(hiRes);
-      setResults(cards);
-    } catch (err) {
-      // Surfacing the real reason (not just a generic line) so a repeat failure is actually
-      // diagnosable instead of just "try a clearer photo" every time.
-      setError(
-        `Couldn't read the cards in that photo${err && err.message ? ` (${err.message})` : ""}. Try a clearer, well-lit shot with the cards spread out and not overlapping, or try again.`
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function addOne(item, idx) {
-    onQuickAdd(item);
-    setAddedIndices((prev) => ({ ...prev, [idx]: true }));
-  }
-
-  function reset() {
-    setPhotoFile(null);
-    setPreview(null);
-    setResults(null);
-    setError(null);
-    setAddedIndices({});
-  }
-
-  return (
-    <div className="appraise-wrap">
-      <p className="checklist-intro">
-        At a show and want a fast read on a stack of cards? Snap one photo with all of them laid out. I'll try to pick out
-        each card and give a rough value — this is a quick single-photo estimate, not a full identification, and nothing
-        is added to your ledger unless you say so below.
-      </p>
-      {!preview ? (
-        <>
-          <input type="file" accept="image/*" capture="environment" id="appraise-input" style={{ display: "none" }} onChange={handlePhotoChosen} />
-          <label htmlFor="appraise-input" className="dropzone">
-            Choose or take a photo of several cards
-          </label>
-        </>
-      ) : (
-        <div className="appraise-preview-row">
-          <div className="appraise-preview">
-            <img src={preview} alt="cards to appraise" />
-          </div>
-          <div className="appraise-preview-actions">
-            {!results && !loading && (
-              <button type="button" className="btn-primary" onClick={runAppraise}>
-                Get rough values
-              </button>
-            )}
-            <button type="button" className="link-btn" onClick={reset}>
-              Choose a different photo
-            </button>
-          </div>
-        </div>
-      )}
-      {loading && <p className="scan-status">Scanning the photo for individual cards and estimating rough values...</p>}
-      {error && <p className="identify-error">{error}</p>}
-      {results &&
-        (results.length === 0 ? (
-          <p className="checklist-empty">Couldn't make out any individual cards in that photo.</p>
-        ) : (
-          <div className="appraise-results">
-            {results.map((item, idx) => (
-              <div className="appraise-result-row" key={idx}>
-                <div className="appraise-result-main">
-                  <div className="tile-player">{item.player || "Unknown player"}</div>
-                  <div className="tile-sub">
-                    {[item.year, item.brand, item.set, item.team].filter(Boolean).join(" · ")}
-                    {item.cardNumber ? ` #${item.cardNumber}` : ""}
-                  </div>
-                  {item.confidence && <span className="confidence-badge">{item.confidence} confidence</span>}
-                </div>
-                <div className="appraise-result-value">{item.estimatedValue !== null && item.estimatedValue !== undefined ? moneyOrDash(item.estimatedValue) : "—"}</div>
-                <button type="button" className="btn-secondary" disabled={!!addedIndices[idx]} onClick={() => addOne(item, idx)}>
-                  {addedIndices[idx] ? "Added" : "Add to ledger"}
-                </button>
-              </div>
-            ))}
-          </div>
-        ))}
-    </div>
-  );
-}
-
 // Splits one team's cards into as many equal-size packs as they'll fill (Kaleb's own eBay
 // convention: packs of a fixed size, 20 by default), balancing approximate value across those
 // packs so no single pack is stuck with all the cheap commons or all the expensive hits.
@@ -2218,10 +2024,22 @@ function buildListingCopyText(listing, discountPct) {
   return lines.join("\n");
 }
 
-function SellerPanel({ cards, bundles, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold }) {
+function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold }) {
   const [bundleSize, setBundleSize] = useState(20);
   const [discountPct, setDiscountPct] = useState(50);
   const [copiedKey, setCopiedKey] = useState(null);
+  // Round 36: which "Suggested listings" cards are expanded to show photos, keyed the same way
+  // as each listing's own React key below. Collapsed by default -- these packs can run to 20+
+  // cards, and Kaleb only wants the photos once he's actually about to work on a specific pack.
+  const [expandedListingKeys, setExpandedListingKeys] = useState(() => new Set());
+  function toggleListingExpanded(key) {
+    setExpandedListingKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   const safeBundleSize = Math.max(1, Math.round(Number(bundleSize) || 20));
   const safeDiscount = Math.min(100, Math.max(0, Math.round(Number(discountPct) || 0)));
@@ -2364,9 +2182,18 @@ function SellerPanel({ cards, bundles, onOpenDetail, onCreateBundle, onDissolveB
           listings.map((listing, idx) => {
             const key = `suggested-${listing.kind}-${listing.team || "mixed"}-${idx}`;
             const suggested = listing.total * (1 - safeDiscount / 100);
+            const isExpanded = expandedListingKeys.has(key);
             return (
               <div className="seller-bundle-card" key={key}>
-                <div className="seller-listing-title">{suggestedListingTitle(listing)}</div>
+                <button
+                  type="button"
+                  className="seller-listing-title seller-listing-toggle"
+                  onClick={() => toggleListingExpanded(key)}
+                  aria-expanded={isExpanded}
+                >
+                  <span className={isExpanded ? "seller-expand-caret seller-expand-caret-open" : "seller-expand-caret"}>▸</span>
+                  {suggestedListingTitle(listing)}
+                </button>
                 <div className="seller-bundle-header">
                   <div className="seller-price-block">
                     <div className="seller-bundle-value">{money(suggested)}</div>
@@ -2384,18 +2211,32 @@ function SellerPanel({ cards, bundles, onOpenDetail, onCreateBundle, onDissolveB
                     {listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}
                   </div>
                 )}
-                <ul className="seller-bundle-list">
-                  {listing.cards.map((c) => (
-                    <li key={c.id} onClick={() => onOpenDetail(c)}>
-                      <span className="seller-bundle-player">{c.player}</span>
-                      <span className="tile-sub">
-                        {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
-                        {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
-                      </span>
-                      <span className="value-cell">{moneyOrDash(c.value)}</span>
-                    </li>
-                  ))}
-                </ul>
+                {/* Round 36: collapsed by default -- expanding shows a photo of each card (not
+                    just its name) so Kaleb can actually recognize the physical card while he's
+                    pulling a pack together, rather than having to match text against his boxes. */}
+                {isExpanded && (
+                  <div className="seller-photo-grid">
+                    {listing.cards.map((c) => {
+                      const pair = getDisplay(c);
+                      const shown = pair.front || pair.back;
+                      return (
+                        <div className="seller-photo-item" key={c.id} onClick={() => onOpenDetail(c)}>
+                          <div className="seller-photo-wrap">
+                            <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                          </div>
+                          <div className="seller-photo-caption">
+                            <span className="seller-bundle-player">{c.player}</span>
+                            <span className="tile-sub">
+                              {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
+                              {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
+                            </span>
+                            <span className="value-cell">{moneyOrDash(c.value)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })
@@ -3298,29 +3139,6 @@ export default function CardLedger() {
     closeEdit();
   }
 
-  // Used by the Appraise panel: opens the normal verify/edit form pre-filled with a
-  // quick-appraisal result, so the person can double check it before it's actually added.
-  function quickAddFromAppraisal(item) {
-    setEditingId(null);
-    setForm({
-      ...blankForm,
-      player: item.player || "",
-      team: item.team || "",
-      sport: SPORTS.includes(item.sport) ? item.sport : "Hockey",
-      year: item.year || "",
-      brand: item.brand || "",
-      set: item.set || "",
-      cardNumber: item.cardNumber || "",
-      value: item.estimatedValue !== null && item.estimatedValue !== undefined ? String(item.estimatedValue) : "",
-      onlineFrontUrl: item.frontImageUrl || null,
-      thumbnailSource: item.frontImageUrl ? "online" : "personal",
-    });
-    resetIdentifyState();
-    setFormError(null);
-    setActiveTab("collection");
-    setShowEdit(true);
-  }
-
   function setThumbnailSource(id, source) {
     persist(cards.map((c) => (c.id === id ? { ...c, thumbnailSource: source } : c)));
   }
@@ -3624,14 +3442,6 @@ export default function CardLedger() {
         .tab-bar button.active { color: var(--navy); border-bottom-color: var(--gold); }
 
 
-        .appraise-preview-row { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
-        .appraise-preview { width: 220px; border-radius: 4px; overflow: hidden; background: #EDE7D6; flex-shrink: 0; }
-        .appraise-preview img { width: 100%; display: block; }
-        .appraise-preview-actions { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-        .appraise-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-        .appraise-result-row { display: flex; align-items: center; gap: 14px; border: 1px solid var(--paper-line); border-radius: 4px; padding: 10px 14px; background: #fff; }
-        .appraise-result-main { flex: 1; display: flex; flex-direction: column; gap: 3px; }
-        .appraise-result-value { font-family: Georgia, serif; font-weight: 700; color: var(--navy); font-size: 15px; width: 90px; text-align: right; flex-shrink: 0; }
         .hide-collected-toggle { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 
         .auto-import-panel input[type="text"] { font-family: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--paper-line); background: #fff; border-radius: 3px; color: var(--ink); }
@@ -3658,6 +3468,21 @@ export default function CardLedger() {
         .seller-section-heading { font-family: Georgia, serif; color: var(--navy); font-size: 17px; margin: 0 0 12px; }
         .seller-bundle-card { border: 1px solid var(--paper-line); border-radius: 4px; background: #fff; margin-bottom: 16px; max-width: 620px; overflow: hidden; }
         .seller-listing-title { display: flex; align-items: center; gap: 8px; font-family: Georgia, serif; font-weight: 700; color: var(--navy); font-size: 15px; padding: 12px 14px 0; }
+        /* Round 36: "Suggested listings" titles are now also a collapse/expand toggle button --
+           reset the button chrome so it still reads as the same title style as "Your bundles"'
+           plain (non-clickable) title just above. */
+        .seller-listing-toggle { width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; }
+        .seller-expand-caret { display: inline-block; transition: transform 0.15s ease; color: var(--muted); font-size: 12px; }
+        .seller-expand-caret-open { transform: rotate(90deg); }
+        .seller-photo-grid { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 14px 14px; }
+        .seller-photo-item { width: 96px; cursor: pointer; }
+        .seller-photo-wrap { width: 96px; aspect-ratio: 5 / 7; background: #EDE7D6; border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+        .seller-photo-wrap img, .seller-photo-wrap .img-fallback { width: 100%; height: 100%; object-fit: contain; }
+        .seller-photo-caption { display: flex; flex-direction: column; gap: 1px; }
+        .seller-photo-caption .seller-bundle-player { font-size: 11.5px; line-height: 1.25; }
+        .seller-photo-caption .tile-sub { font-size: 10.5px; line-height: 1.25; }
+        .seller-photo-caption .value-cell { font-size: 11.5px; font-weight: 600; }
+        .seller-photo-item:hover .seller-bundle-player { text-decoration: underline; color: var(--navy); }
         .seller-status-pill { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 10px; padding: 2px 9px; }
         .seller-status-bundled { color: var(--gold); border: 1px solid var(--gold); }
         .seller-bundle-header { display: flex; align-items: center; gap: 14px; padding: 8px 14px 10px; border-bottom: 1px solid var(--paper-line); flex-wrap: wrap; }
@@ -3935,8 +3760,7 @@ export default function CardLedger() {
           <button className={activeTab === "checklist" ? "active" : ""} onClick={() => setActiveTab("checklist")}>Stars Checklist</button>
           <button className={activeTab === "yg" ? "active" : ""} onClick={() => setActiveTab("yg")}>Young Guns</button>
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
-          <button className={activeTab === "appraise" ? "active" : ""} onClick={() => setActiveTab("appraise")}>Appraise</button>
-          <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Sellers</button>
+          <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Selling</button>
         </div>
 
         {loadError && <div className="banner">Couldn't load your saved collection. Starting from an empty ledger — anything you add now will still be saved going forward.</div>}
@@ -4179,12 +4003,11 @@ export default function CardLedger() {
           />
         ) : activeTab === "autoimport" ? (
           <AutoImportPanel onCardsMayHaveChanged={reloadCardsFromStorage} />
-        ) : activeTab === "appraise" ? (
-          <AppraisePanel onQuickAdd={quickAddFromAppraisal} />
         ) : activeTab === "sellers" ? (
           <SellerPanel
             cards={sellerEligibleCards}
             bundles={sellerBundles}
+            getDisplay={getDisplay}
             onOpenDetail={openDetail}
             onCreateBundle={createSellerBundle}
             onDissolveBundle={dissolveSellerBundle}
