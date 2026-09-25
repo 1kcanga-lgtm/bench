@@ -67,6 +67,12 @@ const SELLER_BUNDLES_KEY = "card-ledger-seller-bundles";
 // card ids aren't locked in until "Mark as bundled"). Persisted the same way bundles are so
 // progress survives a refresh/reload while he works through a pack over more than one sitting.
 const SELLER_FOUND_KEY = "card-ledger-seller-found-ids";
+// Round 39: cards Kaleb has flagged as "can't find" while pulling a pack together -- excluded
+// from every future suggested listing (see the `available` filter in SellerPanel) until cleared,
+// and swapped out of an already-locked-in bundle for a different eligible card the moment it's
+// flagged (see toggleSellerCantFind below), so a pack he's actively assembling doesn't just come
+// up one card short.
+const SELLER_CANT_FIND_KEY = "card-ledger-seller-cant-find-ids";
 // Filenames already seen in a watched scan folder, so re-checking it only turns up genuinely new
 // scans rather than re-queuing everything in the folder every time.
 const WATCH_SEEN_KEY = "card-ledger-watch-seen-files";
@@ -2029,7 +2035,7 @@ function buildListingCopyText(listing, discountPct) {
   return lines.join("\n");
 }
 
-function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold, onToggleFound }) {
+function SellerPanel({ cards, bundles, foundIds, cantFindIds, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold, onToggleFound, onToggleCantFind }) {
   const [bundleSize, setBundleSize] = useState(20);
   const [discountPct, setDiscountPct] = useState(50);
   const [copiedKey, setCopiedKey] = useState(null);
@@ -2076,13 +2082,25 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
 
   // "available" is what's actually eligible for a NEW suggested pack: not on Kaleb's own
   // Stars/checklist (already filtered out before "cards" ever reaches this component), not
-  // already sold, not waiting on review, and not already locked into an existing bundle -- so
-  // scanning in a few hundred new cards never reshuffles a bundle Kaleb's already physically made.
+  // already sold, not waiting on review, not already locked into an existing bundle, and (round
+  // 39) not flagged "can't find" -- so scanning in a few hundred new cards never reshuffles a
+  // bundle Kaleb's already physically made, and a card he's given up looking for stops getting
+  // suggested until he clears the flag. Excluding it here (rather than never handing it to this
+  // component at all) is what lets buildSellerListings naturally fill that card's old slot with a
+  // different one on the very next render -- no separate "replace" logic needed for the
+  // not-yet-bundled case, it falls straight out of the existing bin-packing.
   const available = useMemo(
-    () => cards.filter((c) => !c.sold && !c.needsReview && !bundledIds.has(c.id)),
-    [cards, bundledIds]
+    () => cards.filter((c) => !c.sold && !c.needsReview && !bundledIds.has(c.id) && !cantFindIds.has(c.id)),
+    [cards, bundledIds, cantFindIds]
   );
   const individualSoldCards = useMemo(() => cards.filter((c) => c.sold && !bundledIds.has(c.id)), [cards, bundledIds]);
+  // Round 39: cards currently flagged "can't find" that are still otherwise in play (not sold,
+  // not sitting in some bundle) -- shown in their own section below so flagging one doesn't just
+  // make it vanish without a way back; "Found it after all" there clears the flag.
+  const cantFindCards = useMemo(
+    () => cards.filter((c) => cantFindIds.has(c.id) && !c.sold && !bundledIds.has(c.id)),
+    [cards, cantFindIds, bundledIds]
+  );
 
   const { listings, finalLeftover } = useMemo(
     () => buildSellerListings(available, safeBundleSize),
@@ -2104,7 +2122,7 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
   const soldBundleCardCount = soldBundleListings.reduce((s, b) => s + b.cards.length, 0);
   const soldBundleTotal = soldBundleListings.reduce((s, b) => s + b.total, 0);
 
-  if (available.length === 0 && bundleListings.length === 0 && individualSoldCards.length === 0) {
+  if (available.length === 0 && bundleListings.length === 0 && individualSoldCards.length === 0 && cantFindCards.length === 0) {
     return (
       <div className="empty-state">
         <p>Nothing to sell right now. Cards on your Dallas Stars/North Stars checklist, the Young Guns checklist, and Pro Set cards are never included here -- once you've got some other teams' cards scanned in, suggested packs will show up on this tab.</p>
@@ -2137,12 +2155,27 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
           {activeBundleListings.map((listing) => {
             const key = `bundle-${listing.id}`;
             const suggested = listing.total * (1 - safeDiscount / 100);
+            const isExpanded = expandedListingKeys.has(key);
+            // Round 39: same found-progress pill Suggested listings got in round 38 -- a bundle
+            // being physically packed up is exactly when Kaleb still cares about this count.
+            const foundCount = listing.cards.reduce((n, c) => n + (foundIds.has(c.id) ? 1 : 0), 0);
             return (
               <div className="seller-bundle-card" key={key}>
-                <div className="seller-listing-title">
+                <button
+                  type="button"
+                  className="seller-listing-title seller-listing-toggle"
+                  onClick={() => toggleListingExpanded(key)}
+                  aria-expanded={isExpanded}
+                >
+                  <span className={isExpanded ? "seller-expand-caret seller-expand-caret-open" : "seller-expand-caret"}>▸</span>
                   <span>{suggestedListingTitle(listing)}</span>
                   <span className="seller-status-pill seller-status-bundled">Bundled</span>
-                </div>
+                  {foundCount > 0 && (
+                    <span className={foundCount === listing.cards.length ? "seller-found-progress seller-found-progress-complete" : "seller-found-progress"}>
+                      {foundCount === listing.cards.length ? "All found" : `${foundCount}/${listing.cards.length} found`}
+                    </span>
+                  )}
+                </button>
                 <div className="seller-bundle-header">
                   <div className="seller-price-block">
                     <div className="seller-bundle-value">{money(suggested)}</div>
@@ -2161,18 +2194,47 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
                     {listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}
                   </div>
                 )}
-                <ul className="seller-bundle-list">
-                  {listing.cards.map((c) => (
-                    <li key={c.id} onClick={() => onOpenDetail(c)}>
-                      <span className="seller-bundle-player">{c.player}</span>
-                      <span className="tile-sub">
-                        {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
-                        {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
-                      </span>
-                      <span className="value-cell">{moneyOrDash(c.value)}</span>
-                    </li>
-                  ))}
-                </ul>
+                {isExpanded && (
+                  <div className="seller-photo-grid">
+                    {listing.cards.map((c) => {
+                      const pair = getDisplay(c);
+                      const shown = pair.front || pair.back;
+                      const isFound = foundIds.has(c.id);
+                      return (
+                        <div className={isFound ? "seller-photo-item seller-photo-item-found" : "seller-photo-item"} key={c.id}>
+                          <button
+                            type="button"
+                            className="seller-photo-found-toggle"
+                            onClick={() => onToggleFound(c.id)}
+                            aria-pressed={isFound}
+                            title={isFound ? "Found -- click to unmark" : "Mark as found"}
+                          >
+                            <div className="seller-photo-wrap">
+                              <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                              {isFound && <span className="seller-found-badge">✓</span>}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            className="seller-photo-cantfind-toggle"
+                            onClick={() => onToggleCantFind(c.id)}
+                            title="Can't find this one -- swap it out for a different card"
+                          >
+                            Can't find it
+                          </button>
+                          <div className="seller-photo-caption" onClick={() => onOpenDetail(c)}>
+                            <span className="seller-bundle-player">{c.player}</span>
+                            <span className="tile-sub">
+                              {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
+                              {listing.kind === "mixed" ? ` · ${c.team || "Unlisted team"}` : ""}
+                            </span>
+                            <span className="value-cell">{moneyOrDash(c.value)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -2251,6 +2313,18 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
                               {isFound && <span className="seller-found-badge">✓</span>}
                             </div>
                           </button>
+                          {/* Round 39: gives up looking for this specific card -- it's pulled out of
+                              this (still-just-suggested) listing immediately, and buildSellerListings
+                              fills the gap with a different eligible card on the very next render, so
+                              the pack stays at its target size instead of just coming up one short. */}
+                          <button
+                            type="button"
+                            className="seller-photo-cantfind-toggle"
+                            onClick={() => onToggleCantFind(c.id)}
+                            title="Can't find this one -- swap it out for a different card"
+                          >
+                            Can't find it
+                          </button>
                           <div className="seller-photo-caption" onClick={() => onOpenDetail(c)}>
                             <span className="seller-bundle-player">{c.player}</span>
                             <span className="tile-sub">
@@ -2269,6 +2343,23 @@ function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCre
           })
         )}
       </div>
+
+      {cantFindCards.length > 0 && (
+        <div className="seller-section seller-missing-section">
+          <h3 className="seller-section-heading">Can't find ({cantFindCards.length})</h3>
+          <p className="seller-note">Flagged as missing while pulling a pack together -- excluded from every suggested listing until you clear it here.</p>
+          <ul className="seller-bundle-list">
+            {cantFindCards.map((c) => (
+              <li key={c.id} onClick={() => onOpenDetail(c)}>
+                <span className="seller-bundle-player">{c.player}</span>
+                <span className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")} · {c.team || "Unlisted team"}</span>
+                <span className="value-cell">{moneyOrDash(c.value)}</span>
+                <button type="button" className="link-btn" onClick={(e) => { e.stopPropagation(); onToggleCantFind(c.id); }}>Found it after all</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {finalLeftover.length > 0 && (
         <div className="seller-leftover">
@@ -2388,6 +2479,7 @@ export default function CardLedger() {
   const [checklistManual, setChecklistManual] = useState({});
   const [sellerBundles, setSellerBundles] = useState([]);
   const [sellerFoundIds, setSellerFoundIds] = useState(() => new Set());
+  const [sellerCantFindIds, setSellerCantFindIds] = useState(() => new Set());
   const [checklistQuery, setChecklistQuery] = useState("");
   const [checklistHideCollected, setChecklistHideCollected] = useState(false);
   const [expandedYears, setExpandedYears] = useState({});
@@ -2435,6 +2527,12 @@ export default function CardLedger() {
         if (foundResult && foundResult.value) setSellerFoundIds(new Set(JSON.parse(foundResult.value)));
       } catch (e) {
         // "found" progress is a nice-to-have; fail silently
+      }
+      try {
+        const cantFindResult = await window.storage.get(SELLER_CANT_FIND_KEY, false);
+        if (cantFindResult && cantFindResult.value) setSellerCantFindIds(new Set(JSON.parse(cantFindResult.value)));
+      } catch (e) {
+        // "can't find" flags are a nice-to-have; fail silently
       } finally {
         setLoaded(true);
       }
@@ -2565,6 +2663,76 @@ export default function CardLedger() {
     if (next.has(cardId)) next.delete(cardId);
     else next.add(cardId);
     persistSellerFoundIds(next);
+  }
+
+  async function persistSellerCantFindIds(nextSet) {
+    setSellerCantFindIds(nextSet);
+    try {
+      await window.storage.set(SELLER_CANT_FIND_KEY, JSON.stringify(Array.from(nextSet)), false);
+    } catch (e) {
+      // best-effort; the gallery/list save error banner already covers the main storage path
+    }
+  }
+
+  // Round 39: "Can't find it" -- toggles the flag, and if the card was already locked into a
+  // bundle, immediately swaps in a different eligible card (closest in value, same team when the
+  // bundle is a single-team pack) so that bundle stays at its original size instead of quietly
+  // shrinking by one. A not-yet-bundled ("suggested") card needs no swap here at all -- excluding
+  // it from `available` (see SellerPanel) is enough for buildSellerListings to naturally pull a
+  // different card into its old slot on the very next render. If no replacement candidate exists,
+  // the card is simply dropped from the bundle -- better a smaller pack than a silently wrong one.
+  function toggleSellerCantFind(cardId) {
+    const alreadyFlagged = sellerCantFindIds.has(cardId);
+    const next = new Set(sellerCantFindIds);
+    if (alreadyFlagged) {
+      next.delete(cardId);
+      persistSellerCantFindIds(next);
+      return;
+    }
+    next.add(cardId);
+    persistSellerCantFindIds(next);
+
+    // No longer meaningful to also show this card as "found" once it's flagged missing.
+    if (sellerFoundIds.has(cardId)) {
+      const nextFound = new Set(sellerFoundIds);
+      nextFound.delete(cardId);
+      persistSellerFoundIds(nextFound);
+    }
+
+    const bundle = sellerBundles.find((b) => !b.sold && b.cardIds.includes(cardId));
+    if (!bundle) return; // just a suggested-listing card -- the algorithm reflows on its own.
+
+    const alreadyBundledIds = new Set(sellerBundles.flatMap((b) => b.cardIds));
+    const candidates = cards.filter(
+      (c) =>
+        c.id !== cardId &&
+        !c.sold &&
+        !c.needsReview &&
+        !alreadyBundledIds.has(c.id) &&
+        !next.has(c.id) &&
+        !isStarsCollectionCard(c) &&
+        !isProSetCard(c)
+    );
+    let replacement = null;
+    if (candidates.length > 0) {
+      const sameTeamOnly = bundle.kind === "team" ? candidates.filter((c) => (c.team || "Unlisted team") === bundle.team) : candidates;
+      const pool = sameTeamOnly.length > 0 ? sameTeamOnly : candidates;
+      const missingCard = cards.find((c) => c.id === cardId);
+      const missingValue = Number(missingCard && missingCard.value) || 0;
+      const best = pool.reduce((acc, c) => {
+        const diff = Math.abs((Number(c.value) || 0) - missingValue);
+        return !acc || diff < acc.diff ? { card: c, diff } : acc;
+      }, null);
+      replacement = best ? best.card : null;
+    }
+
+    const nextBundles = sellerBundles.map((b) => {
+      if (b.id !== bundle.id) return b;
+      const ids = b.cardIds.filter((id) => id !== cardId);
+      if (replacement) ids.push(replacement.id);
+      return { ...b, cardIds: ids };
+    });
+    persistSellerBundles(nextBundles);
   }
 
   // "Mark as bundled" on a suggested (still-ephemeral) Sellers listing: locks in exactly that set
@@ -3559,6 +3727,9 @@ export default function CardLedger() {
         .seller-photo-item-found .seller-photo-wrap { outline: 2px solid #2E7D46; outline-offset: -2px; }
         .seller-photo-item-found .seller-photo-wrap img { opacity: 0.55; }
         .seller-found-badge { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; background: #2E7D46; color: #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+        .seller-photo-cantfind-toggle { display: block; width: 100%; margin: 3px 0 4px; padding: 2px 0; border: 1px solid #C0392B; border-radius: 3px; background: none; color: #C0392B; font-size: 10px; font-weight: 600; cursor: pointer; font-family: inherit; }
+        .seller-photo-cantfind-toggle:hover { background: #C0392B; color: #fff; }
+        .seller-missing-section .seller-bundle-list .link-btn { margin-left: 10px; flex-shrink: 0; }
         .seller-photo-caption { display: flex; flex-direction: column; gap: 1px; cursor: pointer; }
         .seller-photo-caption .seller-bundle-player { font-size: 11.5px; line-height: 1.25; }
         .seller-photo-caption .tile-sub { font-size: 10.5px; line-height: 1.25; }
@@ -4089,6 +4260,7 @@ export default function CardLedger() {
             cards={sellerEligibleCards}
             bundles={sellerBundles}
             foundIds={sellerFoundIds}
+            cantFindIds={sellerCantFindIds}
             getDisplay={getDisplay}
             onOpenDetail={openDetail}
             onCreateBundle={createSellerBundle}
@@ -4097,6 +4269,7 @@ export default function CardLedger() {
             onReturnBundleToGallery={returnSellerBundleToGallery}
             onToggleSold={toggleSold}
             onToggleFound={toggleSellerFound}
+            onToggleCantFind={toggleSellerCantFind}
           />
         ) : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
