@@ -62,6 +62,11 @@ const CHECKLIST_MANUAL_KEY = "card-ledger-checklist-manual";
 // *grouping* itself -- which cards go together -- stays fixed once Kaleb locks it in, instead of
 // reshuffling every time the Sellers tab recomputes its suggestions.
 const SELLER_BUNDLES_KEY = "card-ledger-seller-bundles";
+// Round 38: which cards Kaleb has physically found/pulled while assembling a not-yet-bundled
+// Suggested listing -- just a set of card ids, separate from the bundles themselves (a listing's
+// card ids aren't locked in until "Mark as bundled"). Persisted the same way bundles are so
+// progress survives a refresh/reload while he works through a pack over more than one sitting.
+const SELLER_FOUND_KEY = "card-ledger-seller-found-ids";
 // Filenames already seen in a watched scan folder, so re-checking it only turns up genuinely new
 // scans rather than re-queuing everything in the folder every time.
 const WATCH_SEEN_KEY = "card-ledger-watch-seen-files";
@@ -2024,7 +2029,7 @@ function buildListingCopyText(listing, discountPct) {
   return lines.join("\n");
 }
 
-function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold }) {
+function SellerPanel({ cards, bundles, foundIds, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold, onToggleFound }) {
   const [bundleSize, setBundleSize] = useState(20);
   const [discountPct, setDiscountPct] = useState(50);
   const [copiedKey, setCopiedKey] = useState(null);
@@ -2102,7 +2107,7 @@ function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle,
   if (available.length === 0 && bundleListings.length === 0 && individualSoldCards.length === 0) {
     return (
       <div className="empty-state">
-        <p>Nothing to sell right now. Cards on your Dallas Stars/North Stars checklist and the Young Guns checklist are never included here -- once you've got some other teams' cards scanned in, suggested packs will show up on this tab.</p>
+        <p>Nothing to sell right now. Cards on your Dallas Stars/North Stars checklist, the Young Guns checklist, and Pro Set cards are never included here -- once you've got some other teams' cards scanned in, suggested packs will show up on this tab.</p>
       </div>
     );
   }
@@ -2110,7 +2115,7 @@ function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle,
   return (
     <div className="seller-panel">
       <p className="seller-note">
-        Cards on your Dallas Stars/North Stars checklist or the Young Guns checklist are left out of everything below -- those aren't for sale.
+        Cards on your Dallas Stars/North Stars checklist or the Young Guns checklist are left out of everything below -- those aren't for sale. Pro Set cards are left out too -- you keep those in a separate pile.
       </p>
 
       <div className="controls seller-controls">
@@ -2183,6 +2188,9 @@ function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle,
             const key = `suggested-${listing.kind}-${listing.team || "mixed"}-${idx}`;
             const suggested = listing.total * (1 - safeDiscount / 100);
             const isExpanded = expandedListingKeys.has(key);
+            // Round 38: how many of THIS listing's cards Kaleb has already found/pulled -- shown
+            // next to the title so progress is visible even while the listing is collapsed.
+            const foundCount = listing.cards.reduce((n, c) => n + (foundIds.has(c.id) ? 1 : 0), 0);
             return (
               <div className="seller-bundle-card" key={key}>
                 <button
@@ -2192,7 +2200,12 @@ function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle,
                   aria-expanded={isExpanded}
                 >
                   <span className={isExpanded ? "seller-expand-caret seller-expand-caret-open" : "seller-expand-caret"}>▸</span>
-                  {suggestedListingTitle(listing)}
+                  <span>{suggestedListingTitle(listing)}</span>
+                  {foundCount > 0 && (
+                    <span className={foundCount === listing.cards.length ? "seller-found-progress seller-found-progress-complete" : "seller-found-progress"}>
+                      {foundCount === listing.cards.length ? "All found" : `${foundCount}/${listing.cards.length} found`}
+                    </span>
+                  )}
                 </button>
                 <div className="seller-bundle-header">
                   <div className="seller-price-block">
@@ -2219,12 +2232,26 @@ function SellerPanel({ cards, bundles, getDisplay, onOpenDetail, onCreateBundle,
                     {listing.cards.map((c) => {
                       const pair = getDisplay(c);
                       const shown = pair.front || pair.back;
+                      const isFound = foundIds.has(c.id);
                       return (
-                        <div className="seller-photo-item" key={c.id} onClick={() => onOpenDetail(c)}>
-                          <div className="seller-photo-wrap">
-                            <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
-                          </div>
-                          <div className="seller-photo-caption">
+                        <div className={isFound ? "seller-photo-item seller-photo-item-found" : "seller-photo-item"} key={c.id}>
+                          {/* Round 38: a dedicated "found it" toggle, separate from clicking the photo
+                              itself (which still opens the full detail popup, unchanged) -- clicking
+                              anywhere on the thumbnail marks/unmarks it as physically pulled for this
+                              pack, so Kaleb can track progress while going through his boxes. */}
+                          <button
+                            type="button"
+                            className="seller-photo-found-toggle"
+                            onClick={() => onToggleFound(c.id)}
+                            aria-pressed={isFound}
+                            title={isFound ? "Found -- click to unmark" : "Mark as found"}
+                          >
+                            <div className="seller-photo-wrap">
+                              <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                              {isFound && <span className="seller-found-badge">✓</span>}
+                            </div>
+                          </button>
+                          <div className="seller-photo-caption" onClick={() => onOpenDetail(c)}>
                             <span className="seller-bundle-player">{c.player}</span>
                             <span className="tile-sub">
                               {[c.year, c.brand, c.set].filter(Boolean).join(" · ")}
@@ -2360,6 +2387,7 @@ export default function CardLedger() {
 
   const [checklistManual, setChecklistManual] = useState({});
   const [sellerBundles, setSellerBundles] = useState([]);
+  const [sellerFoundIds, setSellerFoundIds] = useState(() => new Set());
   const [checklistQuery, setChecklistQuery] = useState("");
   const [checklistHideCollected, setChecklistHideCollected] = useState(false);
   const [expandedYears, setExpandedYears] = useState({});
@@ -2401,6 +2429,12 @@ export default function CardLedger() {
         if (bundlesResult && bundlesResult.value) setSellerBundles(JSON.parse(bundlesResult.value));
       } catch (e) {
         // seller bundles are a nice-to-have; fail silently
+      }
+      try {
+        const foundResult = await window.storage.get(SELLER_FOUND_KEY, false);
+        if (foundResult && foundResult.value) setSellerFoundIds(new Set(JSON.parse(foundResult.value)));
+      } catch (e) {
+        // "found" progress is a nice-to-have; fail silently
       } finally {
         setLoaded(true);
       }
@@ -2514,6 +2548,25 @@ export default function CardLedger() {
     }
   }
 
+  async function persistSellerFoundIds(nextSet) {
+    setSellerFoundIds(nextSet);
+    try {
+      await window.storage.set(SELLER_FOUND_KEY, JSON.stringify(Array.from(nextSet)), false);
+    } catch (e) {
+      // best-effort; the gallery/list save error banner already covers the main storage path
+    }
+  }
+
+  // Round 38: toggles whether Kaleb has physically found/pulled one card for a Suggested listing
+  // he's in the middle of assembling. Purely a tracking aid -- doesn't affect which pack a card
+  // belongs to or whether it's eligible to be bundled/sold.
+  function toggleSellerFound(cardId) {
+    const next = new Set(sellerFoundIds);
+    if (next.has(cardId)) next.delete(cardId);
+    else next.add(cardId);
+    persistSellerFoundIds(next);
+  }
+
   // "Mark as bundled" on a suggested (still-ephemeral) Sellers listing: locks in exactly that set
   // of card ids as a real, persisted group. From this point on those cards are excluded from
   // every future auto-generated suggestion (see bundledCardIds/sellerEligibleCards below) even as
@@ -2529,6 +2582,18 @@ export default function CardLedger() {
       sold: false,
     };
     persistSellerBundles([...sellerBundles, bundle]);
+    // Round 38: once a listing is actually locked in as a bundle, its cards are done being
+    // "hunted for" -- clear their found-flags so they don't carry stale checkmarks into whatever
+    // gets suggested next, and so the found-tracking storage doesn't grow forever.
+    if (sellerFoundIds.size > 0) {
+      const bundledSet = new Set(bundle.cardIds);
+      const hasAny = bundle.cardIds.some((id) => sellerFoundIds.has(id));
+      if (hasAny) {
+        const next = new Set(sellerFoundIds);
+        bundledSet.forEach((id) => next.delete(id));
+        persistSellerFoundIds(next);
+      }
+    }
   }
 
   // Undoes a not-yet-sold bundle -- Kaleb changed his mind before actually taping it together, or
@@ -2770,12 +2835,22 @@ export default function CardLedger() {
     return c.team === "Dallas Stars" || c.team === "Minnesota North Stars" || starsRelatedCardIds.has(c.id);
   }
 
+  // Round 38: Kaleb physically keeps his Pro Set cards in a separate pile from everything he
+  // actually bundles for sale, so they need to never appear in the Sellers tab at all -- not
+  // grouped into a suggested pack, not counted in a total, nothing. Matched on the `brand` field,
+  // normalized (lowercased, punctuation/spaces stripped) so "Pro Set", "Pro-Set", "PROSET", etc.
+  // all match regardless of exactly how that brand got typed/identified for a given card.
+  function isProSetCard(c) {
+    return String(c.brand || "").toLowerCase().replace(/[^a-z0-9]/g, "") === "proset";
+  }
+
   // Round 30: the Sellers tab is only ever for cards Kaleb actually intends to sell -- anything
   // that's part of his own Dallas Stars/North Stars checklist or the Young Guns checklist
   // (isStarsCollectionCard, same predicate the gallery theming already uses) is excluded
-  // entirely, never counted toward a suggested pack and never up for "mark sold."
+  // entirely, never counted toward a suggested pack and never up for "mark sold." Round 38 adds
+  // Pro Set cards to that same exclusion, for the physical-pile reason above.
   const sellerEligibleCards = useMemo(
-    () => cards.filter((c) => !isStarsCollectionCard(c)),
+    () => cards.filter((c) => !isStarsCollectionCard(c) && !isProSetCard(c)),
     [cards, starsRelatedCardIds]
   );
 
@@ -3471,18 +3546,24 @@ export default function CardLedger() {
         /* Round 36: "Suggested listings" titles are now also a collapse/expand toggle button --
            reset the button chrome so it still reads as the same title style as "Your bundles"'
            plain (non-clickable) title just above. */
-        .seller-listing-toggle { width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; }
+        .seller-listing-toggle { width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .seller-expand-caret { display: inline-block; transition: transform 0.15s ease; color: var(--muted); font-size: 12px; }
         .seller-expand-caret-open { transform: rotate(90deg); }
+        .seller-found-progress { font-size: 11px; font-weight: 600; color: var(--muted); background: #EDE7D6; border-radius: 10px; padding: 2px 8px; }
+        .seller-found-progress-complete { color: #fff; background: #2E7D46; }
         .seller-photo-grid { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 14px 14px; }
-        .seller-photo-item { width: 96px; cursor: pointer; }
-        .seller-photo-wrap { width: 96px; aspect-ratio: 5 / 7; background: #EDE7D6; border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+        .seller-photo-item { width: 96px; }
+        .seller-photo-found-toggle { display: block; width: 100%; padding: 0; border: none; background: none; cursor: pointer; font: inherit; }
+        .seller-photo-wrap { position: relative; width: 96px; aspect-ratio: 5 / 7; background: #EDE7D6; border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
         .seller-photo-wrap img, .seller-photo-wrap .img-fallback { width: 100%; height: 100%; object-fit: contain; }
-        .seller-photo-caption { display: flex; flex-direction: column; gap: 1px; }
+        .seller-photo-item-found .seller-photo-wrap { outline: 2px solid #2E7D46; outline-offset: -2px; }
+        .seller-photo-item-found .seller-photo-wrap img { opacity: 0.55; }
+        .seller-found-badge { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; background: #2E7D46; color: #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+        .seller-photo-caption { display: flex; flex-direction: column; gap: 1px; cursor: pointer; }
         .seller-photo-caption .seller-bundle-player { font-size: 11.5px; line-height: 1.25; }
         .seller-photo-caption .tile-sub { font-size: 10.5px; line-height: 1.25; }
         .seller-photo-caption .value-cell { font-size: 11.5px; font-weight: 600; }
-        .seller-photo-item:hover .seller-bundle-player { text-decoration: underline; color: var(--navy); }
+        .seller-photo-caption:hover .seller-bundle-player { text-decoration: underline; color: var(--navy); }
         .seller-status-pill { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 10px; padding: 2px 9px; }
         .seller-status-bundled { color: var(--gold); border: 1px solid var(--gold); }
         .seller-bundle-header { display: flex; align-items: center; gap: 14px; padding: 8px 14px 10px; border-bottom: 1px solid var(--paper-line); flex-wrap: wrap; }
@@ -4007,6 +4088,7 @@ export default function CardLedger() {
           <SellerPanel
             cards={sellerEligibleCards}
             bundles={sellerBundles}
+            foundIds={sellerFoundIds}
             getDisplay={getDisplay}
             onOpenDetail={openDetail}
             onCreateBundle={createSellerBundle}
@@ -4014,6 +4096,7 @@ export default function CardLedger() {
             onMarkBundleSold={markSellerBundleSold}
             onReturnBundleToGallery={returnSellerBundleToGallery}
             onToggleSold={toggleSold}
+            onToggleFound={toggleSellerFound}
           />
         ) : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
