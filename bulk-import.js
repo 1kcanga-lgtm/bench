@@ -429,6 +429,37 @@ function buildCardEntry(item, parsed, rotatedFront, rotatedBack) {
   };
 }
 
+// Round 40 (Bundling tab): when identification fails outright for a bundling card (not just a
+// low-confidence guess -- a real API/parse error), there's no "parsed" object to build a normal
+// entry from. Rather than silently dropping the card, this saves it into the bundling pool anyway
+// with its photos but blank fields, flagged needsReview so it shows up for Kaleb to fill in by
+// hand or discard from the Bundling tab -- exactly like a low-confidence card does there, just
+// with nothing pre-filled.
+function buildBundlingPlaceholderEntry(item, errMsg) {
+  return {
+    id: crypto.randomUUID(),
+    dateAdded: Date.now(),
+    player: "",
+    team: "",
+    sport: "Other",
+    year: "",
+    brand: "",
+    set: "",
+    cardNumber: "",
+    value: null,
+    onlineFrontUrl: null,
+    onlineBackUrl: null,
+    personalFront: item.front_storage || null,
+    personalBack: item.back_storage || null,
+    purchasePhotoFront: null,
+    purchasePhotoBack: null,
+    thumbnailSource: "personal",
+    bulkAutoImport: true,
+    needsReview: true,
+    identifyError: errMsg || "Couldn't identify this card.",
+  };
+}
+
 // Applies the AI's returned rotation(s) to the full-resolution storage images, exactly mirroring
 // identifyOneItem's rotation + front/back-swap logic in card_ledger.jsx.
 async function rotateForStorage(item, parsed) {
@@ -488,8 +519,19 @@ module.exports = function registerBulkImport(app, db, opts) {
     );
   `);
 
+  // Round 40 (Bundling tab): bulk_jobs predates the idea of a job existing for any purpose other
+  // than importing straight into the main collection. CREATE TABLE IF NOT EXISTS above doesn't
+  // retroactively add columns to a database that already has this table (Kaleb's live one does),
+  // so the new column is added here instead, guarded because ALTER TABLE ADD COLUMN throws if the
+  // column is already there (i.e. every startup after the first one that ran this).
+  try {
+    db.exec(`ALTER TABLE bulk_jobs ADD COLUMN purpose TEXT NOT NULL DEFAULT 'import'`);
+  } catch (e) {
+    // already migrated -- fine.
+  }
+
   const insertJob = db.prepare(
-    `INSERT INTO bulk_jobs (id, folder_name, status, created_at, updated_at, total_items) VALUES (?,?,?,?,?,?)`
+    `INSERT INTO bulk_jobs (id, folder_name, status, created_at, updated_at, total_items, purpose) VALUES (?,?,?,?,?,?,?)`
   );
   const insertItem = db.prepare(
     `INSERT INTO bulk_job_items (id, job_id, folder_name, front_api, back_api, front_storage, back_storage, front_is_phone, back_is_phone, status)
@@ -521,7 +563,10 @@ module.exports = function registerBulkImport(app, db, opts) {
   const bumpJobTotal = db.prepare(`UPDATE bulk_jobs SET total_items = total_items + ?, updated_at=? WHERE id=?`);
   const setJobError = db.prepare(`UPDATE bulk_jobs SET status='error', error_message=?, updated_at=? WHERE id=?`);
   const getJob = db.prepare(`SELECT * FROM bulk_jobs WHERE id=?`);
-  const listJobs = db.prepare(`SELECT id, folder_name, status, created_at, updated_at, total_items, auto_added, needs_review, cost_usd, error_message FROM bulk_jobs ORDER BY created_at DESC LIMIT 20`);
+  // Filtered by purpose so the existing Auto Import panel (which never sends ?purpose= and just
+  // wants its own "import" jobs) keeps working completely unchanged, while the new Bundling tab
+  // asks for purpose=bundling and sees only its own separate jobs.
+  const listJobs = db.prepare(`SELECT id, folder_name, status, created_at, updated_at, total_items, auto_added, needs_review, cost_usd, error_message, purpose FROM bulk_jobs WHERE purpose=? ORDER BY created_at DESC LIMIT 20`);
   const itemsByStatus = db.prepare(`SELECT * FROM bulk_job_items WHERE job_id=? AND status=?`);
   const setItemBatch = db.prepare(`UPDATE bulk_job_items SET status=?, batch_id=? WHERE id=?`);
   const setItemStatus = db.prepare(`UPDATE bulk_job_items SET status=? WHERE id=?`);
@@ -562,6 +607,17 @@ module.exports = function registerBulkImport(app, db, opts) {
     setStorageStmt.run("card-ledger-entries", JSON.stringify(next));
   }
 
+  // Round 40 (Bundling tab): a completely separate kv key/pool from the main collection, per
+  // Kaleb's choice -- these cards are just being grouped and priced for a bundle listing, not
+  // added to his real bookkeeping, so they never touch "card-ledger-entries" or its counts.
+  function appendCardsToBundlingLedger(entries) {
+    if (!entries.length) return;
+    const row = getStorageStmt.get("card-ledger-bundling-entries");
+    const current = row && row.value ? JSON.parse(row.value) : [];
+    const next = current.concat(entries);
+    setStorageStmt.run("card-ledger-bundling-entries", JSON.stringify(next));
+  }
+
   function safeImportPath(folderName) {
     const rel = String(folderName || "").replace(/^[/\\]+/, "");
     const abs = path.resolve(importRoot, rel);
@@ -587,7 +643,8 @@ module.exports = function registerBulkImport(app, db, opts) {
       }
       const jobId = crypto.randomUUID();
       const now = new Date().toISOString();
-      insertJob.run(jobId, folderName || ".", "processing", now, now, scanned.length);
+      const purpose = req.body && req.body.purpose === "bundling" ? "bundling" : "import";
+      insertJob.run(jobId, folderName || ".", "processing", now, now, scanned.length, purpose);
 
       // Image prep happens up front, synchronously relative to the HTTP request, so this call
       // can take a while for thousands of cards -- that's fine, the frontend doesn't need to
@@ -647,7 +704,8 @@ module.exports = function registerBulkImport(app, db, opts) {
       } else {
         jobId = crypto.randomUUID();
         const folderLabel = String(body.folderLabel || "uploaded folder").slice(0, 200);
-        insertJob.run(jobId, folderLabel, "processing", now, now, 0);
+        const purpose = body.purpose === "bundling" ? "bundling" : "import";
+        insertJob.run(jobId, folderLabel, "processing", now, now, 0, purpose);
       }
       let inserted = 0;
       for (const it of items) {
@@ -673,7 +731,8 @@ module.exports = function registerBulkImport(app, db, opts) {
   });
 
   app.get("/api/bulk-import/jobs", (req, res) => {
-    res.json({ jobs: listJobs.all() });
+    const purpose = req.query && req.query.purpose === "bundling" ? "bundling" : "import";
+    res.json({ jobs: listJobs.all(purpose) });
   });
 
   app.get("/api/bulk-import/jobs/:id", (req, res) => {
@@ -810,7 +869,11 @@ module.exports = function registerBulkImport(app, db, opts) {
     }
   }
 
-  async function finalizeSucceeded(jobId, item, parsed, costUsd) {
+  // NOTE: takes the full job row (not just jobId) so it can branch on job.purpose -- a "bundling"
+  // job (round 40) never touches bulk_review_items at all; everything it identifies, confident or
+  // not, lands straight in the separate bundling pool (needsReview just flags it there for an
+  // inline fix instead of routing to the main Review tab).
+  async function finalizeSucceeded(job, item, parsed, costUsd) {
     addItemCost.run(costUsd, item.id);
     if (needsSearch(parsed) && item.status === "pass1_submitted") {
       // First pass wasn't confident enough -- queue for the search-enabled second pass rather
@@ -818,14 +881,38 @@ module.exports = function registerBulkImport(app, db, opts) {
       setItemStatus.run("pending_pass2", item.id);
       return { toReview: false, saved: false };
     }
-    // Either pass 1 was already confident, or this IS the pass-2 (search-enabled) result --
-    // accept anything better than "low" at this point; a card search still couldn't pin down
+    // Either pass 1 was already confident, or this IS the pass-2 (search-enabled) result.
+    const lowConfidence = parsed.confidence === "low" || !parsed.confidence;
+
+    if (job.purpose === "bundling") {
+      const rotated = await rotateForStorage(item, parsed).catch(() => null);
+      const entry = buildCardEntry(
+        {
+          ...item,
+          front_is_phone: (rotated && rotated.frontIsPhoneOverride) || item.front_is_phone,
+          back_is_phone: (rotated && rotated.backIsPhoneOverride) || item.back_is_phone,
+        },
+        parsed,
+        (rotated && rotated.front) || item.front_storage,
+        (rotated && rotated.back) || item.back_storage
+      );
+      entry.bundlingJobId = job.id;
+      // Still confident enough to keep pass 1's "high"/"medium" without a search pass, or this
+      // came back low even after search -- either way it goes in; low confidence just gets
+      // flagged for a quick look in the Bundling tab rather than blocking the pool.
+      entry.needsReview = lowConfidence;
+      appendCardsToBundlingLedger([entry]);
+      setItemStatus.run("saved", item.id);
+      return { toReview: lowConfidence, saved: true };
+    }
+
+    // Accept anything better than "low" at this point; a card search still couldn't pin down
     // gets a human look rather than a guess landing permanently in the collection.
-    if (parsed.confidence === "low" || !parsed.confidence) {
+    if (lowConfidence) {
       const rotated = await rotateForStorage(item, parsed).catch(() => null);
       insertReview.run(
         crypto.randomUUID(),
-        jobId,
+        job.id,
         item.folder_name,
         (rotated && rotated.front) || item.front_storage,
         (rotated && rotated.back) || item.back_storage,
@@ -848,7 +935,7 @@ module.exports = function registerBulkImport(app, db, opts) {
     return { toReview: false, saved: true };
   }
 
-  async function finalizeFailed(jobId, item, errMsg, costUsd) {
+  async function finalizeFailed(job, item, errMsg, costUsd) {
     addItemCost.run(costUsd, item.id);
     if (item.status === "pass1_submitted") {
       // A plain API/parse failure on the cheap pass gets one more shot with search enabled
@@ -856,9 +943,16 @@ module.exports = function registerBulkImport(app, db, opts) {
       setItemStatus.run("pending_pass2", item.id);
       return { toReview: false, saved: false };
     }
+    if (job.purpose === "bundling") {
+      const entry = buildBundlingPlaceholderEntry(item, errMsg);
+      entry.bundlingJobId = job.id;
+      appendCardsToBundlingLedger([entry]);
+      setItemStatus.run("saved", item.id);
+      return { toReview: true, saved: true };
+    }
     insertReview.run(
       crypto.randomUUID(),
-      jobId,
+      job.id,
       item.folder_name,
       item.front_storage,
       item.back_storage,
@@ -899,18 +993,18 @@ module.exports = function registerBulkImport(app, db, opts) {
           for (const it of batchItems) {
             const line = byCustomId.get(it.id);
             if (!line) {
-              const outcome = await finalizeFailed(job.id, it, "no result returned for this item", 0);
+              const outcome = await finalizeFailed(job, it, "no result returned for this item", 0);
               if (outcome.toReview) reviewThisRound++;
               continue;
             }
             const parsedResult = parseResultLine(line);
             costThisRound += parsedResult.costUsd || 0;
             if (parsedResult.ok) {
-              const outcome = await finalizeSucceeded(job.id, it, parsedResult.parsed, parsedResult.costUsd);
+              const outcome = await finalizeSucceeded(job, it, parsedResult.parsed, parsedResult.costUsd);
               if (outcome.saved) addedThisRound++;
               if (outcome.toReview) reviewThisRound++;
             } else {
-              const outcome = await finalizeFailed(job.id, it, parsedResult.error, parsedResult.costUsd);
+              const outcome = await finalizeFailed(job, it, parsedResult.error, parsedResult.costUsd);
               if (outcome.toReview) reviewThisRound++;
             }
           }
