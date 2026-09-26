@@ -73,6 +73,14 @@ const SELLER_FOUND_KEY = "card-ledger-seller-found-ids";
 // flagged (see toggleSellerCantFind below), so a pack he's actively assembling doesn't just come
 // up one card short.
 const SELLER_CANT_FIND_KEY = "card-ledger-seller-cant-find-ids";
+// Round 40: the Bundling tab's own pool of cards, entirely separate from the main collection
+// ("card-ledger-entries") per Kaleb's choice -- these are cards scanned in a batch purely to get
+// them identified/priced/photographed for an eBay bundle listing, not to be added to his real
+// bookkeeping (total card count, checklist progress, estimated collection value, etc.). The
+// server-side bulk-import pipeline writes here directly (see bulk-import.js's
+// appendCardsToBundlingLedger) once a bundling job's cards come back from the Batch API, exactly
+// mirroring how "card-ledger-entries" itself is written to by a normal Auto Import job.
+const BUNDLING_ENTRIES_KEY = "card-ledger-bundling-entries";
 // Filenames already seen in a watched scan folder, so re-checking it only turns up genuinely new
 // scans rather than re-queuing everything in the folder every time.
 const WATCH_SEEN_KEY = "card-ledger-watch-seen-files";
@@ -1638,6 +1646,461 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
   );
 }
 
+// --- Round 40: Bundling -- scan a batch of cards meant for a single eBay bundle (Kaleb's own
+// convention: about 30 at a time, grabbed from a specific team or just at random), upload the
+// folder, and let the exact same identify-and-price pipeline Auto Import uses (same server route,
+// same background Batch API tick loop, just tagged purpose:"bundling") turn it into a ready-made
+// title, total price, and copy-paste listing description instead of Kaleb pricing each card by
+// hand. Cards land in their own separate, lightweight pool (see BUNDLING_ENTRIES_KEY at the
+// CardLedger level) rather than the main collection -- they never touch its totals, checklists, or
+// counts, and "Clear bundle" below just empties this tab's pool once that pack is bagged and
+// listed, no different from throwing away a shipping label once it's used.
+function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard, onDiscardCard, onDiscardJob }) {
+  const [folderInput, setFolderInput] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState(null);
+  const [jobs, setJobs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
+  const [uploadError, setUploadError] = useState(null);
+  const [uploadDone, setUploadDone] = useState(null);
+  const [retryingJobId, setRetryingJobId] = useState(null);
+  const [retryJobError, setRetryJobError] = useState(null);
+  const [discountPct, setDiscountPct] = useState(50);
+  const [copiedKey, setCopiedKey] = useState(null);
+  const [expandedPackKeys, setExpandedPackKeys] = useState(() => new Set());
+  const [drafts, setDrafts] = useState({}); // bundling card id -> editable form fields, for a needsReview card
+
+  const safeDiscount = Math.min(90, Math.max(0, Number(discountPct) || 0));
+
+  async function refresh() {
+    try {
+      const jobsRes = await fetch("/api/bulk-import/jobs?purpose=bundling").then((r) => r.json());
+      setJobs((jobsRes && jobsRes.jobs) || []);
+      // A running job saves identified cards straight into the bundling pool server-side with this
+      // tab just sitting here polling -- keep it in sync without a manual refresh, exactly like
+      // Auto Import does for the main collection.
+      if (onCardsMayHaveChanged) onCardsMayHaveChanged();
+    } catch (e) {
+      // transient network hiccup while polling -- next poll will just try again
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 6000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function retryJob(jobId) {
+    setRetryingJobId(jobId);
+    setRetryJobError(null);
+    try {
+      const res = await fetch(`/api/bulk-import/jobs/${jobId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't retry that.");
+      await refresh();
+    } catch (e) {
+      setRetryJobError(e.message);
+    } finally {
+      setRetryingJobId(null);
+    }
+  }
+
+  async function startImport() {
+    if (!folderInput.trim()) {
+      setStartError("Enter the folder name (relative to your configured import folder on the server).");
+      return;
+    }
+    setStarting(true);
+    setStartError(null);
+    try {
+      const res = await fetch("/api/bulk-import/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder: folderInput.trim(), purpose: "bundling" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error((data.error && data.error.message) || "Couldn't start the import.");
+      setFolderInput("");
+      await refresh();
+    } catch (e) {
+      setStartError(e.message);
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  // Identical in spirit to AutoImportPanel's uploadFolder -- same client-side resize/EXIF/grouping
+  // helpers, same chunked ingest endpoint -- just tagged purpose:"bundling" so the server keeps
+  // these cards out of the main ledger and out of AutoImportPanel's own job list.
+  async function uploadFolder(fileList) {
+    setUploadError(null);
+    setUploadDone(null);
+    const groups = buildFolderGroupsFromFileList(fileList);
+    let items = [];
+    for (const g of groups) items = items.concat(folderGroupToUploadItems(g));
+    if (!items.length) {
+      setUploadError(
+        "No image files were found in that folder (looking for .jpg, .jpeg, .png, or .webp files, including inside subfolders)."
+      );
+      return;
+    }
+    const folderLabel = autoImportFolderLabel(fileList);
+    setUploading(true);
+    setUploadProgress({ done: 0, total: items.length });
+    let jobId = null;
+    const CHUNK_SIZE = 8;
+    try {
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
+        const prepared = await Promise.all(
+          chunk.map(async (it) => {
+            const [frontApi, frontStorage, frontPhoto] = await Promise.all([
+              fileToResizedDataUrl(it.frontFile, 1024, 0.85),
+              fileToResizedDataUrl(it.frontFile, 1280, 0.85),
+              detectPhotoSource(it.frontFile),
+            ]);
+            let backApi = null;
+            let backStorage = null;
+            let backPhoto = { isLikelyPhone: false };
+            if (it.backFile) {
+              [backApi, backStorage, backPhoto] = await Promise.all([
+                fileToResizedDataUrl(it.backFile, 1024, 0.85),
+                fileToResizedDataUrl(it.backFile, 1280, 0.85),
+                detectPhotoSource(it.backFile),
+              ]);
+            }
+            return {
+              folderName: it.folderName,
+              frontApi,
+              backApi,
+              frontStorage,
+              backStorage,
+              frontIsPhone: frontPhoto.isLikelyPhone,
+              backIsPhone: backPhoto.isLikelyPhone,
+            };
+          })
+        );
+        const res = await fetch("/api/bulk-import/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId, folderLabel, purpose: "bundling", items: prepared }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error((data.error && data.error.message) || "Upload failed partway through.");
+        jobId = data.jobId;
+        setUploadProgress((p) => ({ done: Math.min(p.total, p.done + chunk.length), total: p.total }));
+      }
+      await refresh();
+      setUploadDone(
+        `Uploaded all ${items.length} card${items.length === 1 ? "" : "s"} from "${folderLabel}" for bundling. It'll show up below once ` +
+          `identification finishes -- that happens on the server in the background, same as Auto Import, so this can take a few minutes.`
+      );
+    } catch (e) {
+      setUploadError(
+        `${e.message} -- cards already uploaded before this happened are safely queued and will still be identified, so you don't need ` +
+          `to redo those. If some of the folder never made it up, just pick the same folder again.`
+      );
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function togglePackExpanded(key) {
+    setExpandedPackKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function defaultDraft(card) {
+    return {
+      player: card.player || "",
+      team: card.team || "",
+      sport: SPORTS.includes(card.sport) ? card.sport : "Hockey",
+      year: card.year || "",
+      brand: card.brand || "",
+      set: card.set || "",
+      cardNumber: card.cardNumber || "",
+      value: card.value !== null && card.value !== undefined ? String(card.value) : "",
+    };
+  }
+
+  // Seeds the FULL default draft (every field) into state on a card's first edit, not just the
+  // one field that changed -- otherwise a second field typed into (or Save itself) would find the
+  // rest of the draft's fields missing/undefined instead of falling back to the card's own values.
+  function updateDraft(card, field, value) {
+    setDrafts((prev) => ({ ...prev, [card.id]: { ...(prev[card.id] || defaultDraft(card)), [field]: value } }));
+  }
+
+  function draftFor(card) {
+    return (
+      drafts[card.id] || defaultDraft(card)
+    );
+  }
+
+  function saveCardCorrection(card) {
+    const draft = draftFor(card);
+    if (!draft.player || !draft.player.trim()) return;
+    onUpdateCard(card.id, {
+      player: draft.player.trim(),
+      team: draft.team.trim(),
+      sport: SPORTS.includes(draft.sport) ? draft.sport : "Other",
+      year: draft.year.trim(),
+      brand: draft.brand.trim(),
+      set: draft.set.trim(),
+      cardNumber: draft.cardNumber.trim(),
+      value: draft.value === "" || isNaN(Number(draft.value)) ? null : Number(draft.value),
+      needsReview: false,
+      identifyError: null,
+    });
+    setDrafts((prev) => {
+      const next = { ...prev };
+      delete next[card.id];
+      return next;
+    });
+  }
+
+  function copyPack(listing, key) {
+    try {
+      navigator.clipboard.writeText(buildListingCopyText(listing, safeDiscount));
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
+    } catch (e) {
+      // clipboard access can be blocked in some contexts -- the listing text is still fully
+      // visible on screen either way, so this is a convenience, not something the feature depends on.
+    }
+  }
+
+  const activeJobs = jobs.filter((j) => j.status === "processing");
+  const erroredJobs = jobs.filter((j) => j.status === "error");
+
+  // Group the pool by which upload batch each card came from -- that's the natural unit of "a
+  // bundle" here (Kaleb scans roughly 30 cards meant for one bag/listing and uploads them
+  // together). Reuses the exact same suggestedListingTitle/listingTeamBreakdown/buildListingCopyText
+  // helpers the Selling tab already uses for its own packs, just fed a listing built from a whole
+  // upload batch instead of an auto-balanced team pack.
+  const packs = useMemo(() => {
+    const byJob = new Map();
+    for (const c of cards) {
+      const key = c.bundlingJobId || "unassigned";
+      if (!byJob.has(key)) byJob.set(key, []);
+      byJob.get(key).push(c);
+    }
+    return Array.from(byJob.entries())
+      .map(([jobId, packCards]) => {
+        // Only look at cards that actually HAVE a team on file -- a still-unidentified/needsReview
+        // card's blank team shouldn't be enough on its own to make an otherwise single-team pack
+        // (e.g. 29 Bruins cards + 1 not-yet-identified scan) get mislabeled "Mixed Teams".
+        const knownTeams = Array.from(new Set(packCards.filter((c) => c.team).map((c) => c.team)));
+        const kind = knownTeams.length === 1 ? "team" : "mixed";
+        const total = packCards.reduce((s, c) => s + (Number(c.value) || 0), 0);
+        const listing = { kind, team: kind === "team" ? knownTeams[0] : null, cards: packCards, total };
+        const needsReviewCount = packCards.filter((c) => c.needsReview).length;
+        const newestDate = Math.max(0, ...packCards.map((c) => c.dateAdded || 0));
+        return { jobId, cards: packCards, listing, needsReviewCount, newestDate };
+      })
+      .sort((a, b) => b.newestDate - a.newestDate);
+  }, [cards]);
+
+  return (
+    <div className="auto-import-panel bundling-panel">
+      <p className="seller-note">
+        Scan a batch of cards meant for one eBay bundle -- Kaleb's own convention is about 30 at a
+        time, grabbed from a specific team or just at random -- and upload that folder below.
+        Once it's identified you'll get a ready-made title, price, and listing description for the
+        whole batch instead of pricing each card by hand. These cards are separate from your main
+        collection: they never count toward your totals or checklists, and "Clear bundle" just
+        tidies up this tab once that pack is bagged and listed -- it doesn't touch your real ledger.
+      </p>
+
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <input
+          type="file"
+          accept="image/*"
+          multiple
+          webkitdirectory=""
+          id="bundling-upload-input"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = "";
+            if (files.length) uploadFolder(files);
+          }}
+        />
+        <label
+          htmlFor="bundling-upload-input"
+          className="dropzone"
+          style={{ display: "block", textAlign: "center", opacity: uploading ? 0.6 : 1, pointerEvents: uploading ? "none" : "auto" }}
+        >
+          {uploading ? `Uploading ${uploadProgress.done} of ${uploadProgress.total} cards...` : "Choose a folder of scans for one bundle"}
+        </label>
+        {uploading && (
+          <div className="auto-import-progress-track" style={{ marginTop: 8 }}>
+            <div
+              className="auto-import-progress-fill"
+              style={{ width: `${uploadProgress.total ? Math.round((uploadProgress.done / uploadProgress.total) * 100) : 0}%` }}
+            />
+          </div>
+        )}
+        {uploadError && <p className="identify-error">{uploadError}</p>}
+        {uploadDone && <div className="banner banner-success">{uploadDone}</div>}
+
+        <details style={{ marginTop: 20 }}>
+          <summary style={{ cursor: "pointer", fontSize: 13, opacity: 0.85 }}>
+            Already copied scans onto the server yourself? Import from a server folder instead
+          </summary>
+          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+            <input
+              type="text"
+              placeholder="folder name (relative to your configured import folder)"
+              value={folderInput}
+              onChange={(e) => setFolderInput(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button type="button" className="btn-primary" onClick={startImport} disabled={starting}>
+              {starting ? "Starting..." : "Start import"}
+            </button>
+          </div>
+          {startError && <p className="identify-error">{startError}</p>}
+        </details>
+      </div>
+
+      {activeJobs.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <h3>Identifying</h3>
+          {activeJobs.map((job) => (
+            <div key={job.id} className="auto-import-job-card">
+              <p style={{ margin: 0, fontWeight: 600 }}>{job.folder_name}</p>
+              <p style={{ margin: "4px 0", fontSize: 14 }}>
+                {job.auto_added + job.needs_review} of {job.total_items} identified &middot; est. ${job.cost_usd.toFixed(2)} so far
+              </p>
+              <div className="auto-import-progress-track">
+                <div
+                  className="auto-import-progress-fill"
+                  style={{ width: `${Math.min(100, Math.round(((job.auto_added + job.needs_review) / Math.max(1, job.total_items)) * 100))}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {erroredJobs.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <h3>Needs attention</h3>
+          {erroredJobs.map((job) => (
+            <div key={job.id} className="auto-import-job-card">
+              <p style={{ margin: 0, fontWeight: 600 }}>{job.folder_name} -- error</p>
+              {job.error_message && <p className="identify-error">{job.error_message}</p>}
+              <button type="button" className="btn-secondary" onClick={() => retryJob(job.id)} disabled={retryingJobId === job.id}>
+                {retryingJobId === job.id ? "Retrying..." : "Retry"}
+              </button>
+              {retryJobError && retryingJobId === null && <p className="identify-error">{retryJobError}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {packs.length === 0 && activeJobs.length === 0 && (
+        <p style={{ fontSize: 14, opacity: 0.7, textAlign: "center", marginTop: 40 }}>
+          Nothing bundled yet -- upload a folder of scans above to get started.
+        </p>
+      )}
+
+      {packs.length > 0 && (
+        <div className="seller-section" style={{ marginTop: 24 }}>
+          <div className="controls seller-controls">
+            <label className="seller-discount-label">
+              Discount off book value
+              <input type="range" min="0" max="90" value={discountPct} onChange={(e) => setDiscountPct(e.target.value)} />
+              <span className="seller-discount-value">{safeDiscount}%</span>
+            </label>
+          </div>
+          {packs.map((pack) => {
+            const key = `bundling-${pack.jobId}`;
+            const isExpanded = expandedPackKeys.has(key);
+            const suggested = pack.listing.total * (1 - safeDiscount / 100);
+            const breakdown = listingTeamBreakdown(pack.listing);
+            return (
+              <div className="seller-bundle-card" key={key}>
+                <button
+                  type="button"
+                  className="seller-listing-title seller-listing-toggle"
+                  onClick={() => togglePackExpanded(key)}
+                  aria-expanded={isExpanded}
+                >
+                  <span className={isExpanded ? "seller-expand-caret seller-expand-caret-open" : "seller-expand-caret"}>▸</span>
+                  <span>{suggestedListingTitle(pack.listing)}</span>
+                  {pack.needsReviewCount > 0 && (
+                    <span className="seller-found-progress">{pack.needsReviewCount} need a look</span>
+                  )}
+                </button>
+                <div className="seller-bundle-header">
+                  <div className="seller-price-block">
+                    <div className="seller-bundle-value">{money(suggested)}</div>
+                    <div className="tile-sub">book {money(pack.listing.total)}</div>
+                  </div>
+                  <div className="seller-bundle-actions">
+                    <button type="button" className="link-btn" onClick={() => copyPack(pack.listing, key)}>
+                      {copiedKey === key ? "Copied!" : "Copy listing"}
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => onDiscardJob(pack.jobId)}>Clear bundle</button>
+                  </div>
+                </div>
+                <p className="tile-sub" style={{ margin: "0 14px 10px" }}>
+                  {breakdown.map(([t, n]) => `${t} (${n})`).join(", ")}
+                </p>
+                {isExpanded && (
+                  <div className="seller-photo-grid">
+                    {pack.cards.map((c) => {
+                      const pair = getDisplay(c);
+                      const shown = pair.front || pair.back;
+                      const draft = draftFor(c);
+                      return (
+                        <div className={c.needsReview ? "seller-photo-item bundling-photo-item-flagged" : "seller-photo-item"} key={c.id}>
+                          <div className="seller-photo-wrap">
+                            <CardImage src={shown} alt={c.player || "unidentified card"} fallbackLabel="No photo yet" />
+                          </div>
+                          {c.needsReview ? (
+                            <div className="bundling-correction">
+                              {c.identifyError && <p className="identify-error" style={{ fontSize: 11 }}>{c.identifyError}</p>}
+                              <input placeholder="Player" value={draft.player} onChange={(e) => updateDraft(c, "player", e.target.value)} />
+                              <input placeholder="Team" value={draft.team} onChange={(e) => updateDraft(c, "team", e.target.value)} />
+                              <input placeholder="Year" value={draft.year} onChange={(e) => updateDraft(c, "year", e.target.value)} />
+                              <input placeholder="Brand" value={draft.brand} onChange={(e) => updateDraft(c, "brand", e.target.value)} />
+                              <input placeholder="Value ($)" value={draft.value} onChange={(e) => updateDraft(c, "value", e.target.value)} />
+                              <div className="form-actions" style={{ marginTop: 4 }}>
+                                <button type="button" className="link-btn" onClick={() => onDiscardCard(c.id)}>Remove</button>
+                                <button type="button" className="btn-primary" onClick={() => saveCardCorrection(c)} disabled={!draft.player.trim()}>Save</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="bundling-photo-caption">
+                              <div className="seller-bundle-player">{c.player}</div>
+                              <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
+                              <div className="value-cell">{moneyOrDash(c.value)}</div>
+                              <button type="button" className="link-btn" onClick={() => onDiscardCard(c.id)}>Remove</button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Review: cards Kaleb flagged himself from the Gallery/detail view, AND whatever Auto Import
 // couldn't confidently identify on its own (moved here from the Auto Import tab, round 28, so
 // there's one place to work through everything needing a second look instead of two). ---
@@ -2454,7 +2917,7 @@ export default function CardLedger() {
   // search/sort/filter/gallery-list/fix-rotation UI block below, just scoped to a different pool
   // of cards -- see homeCards/the `activeTab === "home" ? homeCards : cards` branches in
   // `filtered`/`usedTeams`/`usedBrands`.
-  const [activeTab, setActiveTab] = useState("home"); // home | collection | review | checklist | yg | autoimport | appraise | sellers
+  const [activeTab, setActiveTab] = useState("home"); // home | collection | review | checklist | yg | autoimport | appraise | sellers | bundling
   const [flipped, setFlipped] = useState({});
   // "Fix rotation" mode: shows both of a card's own photos on its gallery tile with a rotate
   // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
@@ -2480,6 +2943,7 @@ export default function CardLedger() {
   const [sellerBundles, setSellerBundles] = useState([]);
   const [sellerFoundIds, setSellerFoundIds] = useState(() => new Set());
   const [sellerCantFindIds, setSellerCantFindIds] = useState(() => new Set());
+  const [bundlingCards, setBundlingCards] = useState([]);
   const [checklistQuery, setChecklistQuery] = useState("");
   const [checklistHideCollected, setChecklistHideCollected] = useState(false);
   const [expandedYears, setExpandedYears] = useState({});
@@ -2497,6 +2961,18 @@ export default function CardLedger() {
     try {
       const result = await window.storage.get(STORAGE_KEY, false);
       if (result && result.value) setCards(JSON.parse(result.value));
+    } catch (e) {
+      // best-effort refresh -- a failed poll just means the next one will pick up the change
+    }
+  }
+
+  // Round 40: same idea as reloadCardsFromStorage above, but for the Bundling tab's own separate
+  // pool -- a bundling job's cards are written straight into BUNDLING_ENTRIES_KEY by the server
+  // once identified, so BundlingPanel calls this (polling, same as Auto Import) to pick them up.
+  async function reloadBundlingCardsFromStorage() {
+    try {
+      const result = await window.storage.get(BUNDLING_ENTRIES_KEY, false);
+      if (result && result.value) setBundlingCards(JSON.parse(result.value));
     } catch (e) {
       // best-effort refresh -- a failed poll just means the next one will pick up the change
     }
@@ -2533,6 +3009,12 @@ export default function CardLedger() {
         if (cantFindResult && cantFindResult.value) setSellerCantFindIds(new Set(JSON.parse(cantFindResult.value)));
       } catch (e) {
         // "can't find" flags are a nice-to-have; fail silently
+      }
+      try {
+        const bundlingResult = await window.storage.get(BUNDLING_ENTRIES_KEY, false);
+        if (bundlingResult && bundlingResult.value) setBundlingCards(JSON.parse(bundlingResult.value));
+      } catch (e) {
+        // the Bundling pool is a nice-to-have; fail silently
       } finally {
         setLoaded(true);
       }
@@ -2733,6 +3215,41 @@ export default function CardLedger() {
       return { ...b, cardIds: ids };
     });
     persistSellerBundles(nextBundles);
+  }
+
+  // --- Round 40: Bundling tab -- a separate, lightweight pool of cards (see BUNDLING_ENTRIES_KEY
+  // above) that BundlingPanel reads/writes directly, the same way sellerBundles/checklistManual
+  // are just a generic window.storage-backed blob rather than needing their own dedicated backend
+  // endpoints for every little edit. ---
+  async function persistBundlingCards(next) {
+    setBundlingCards(next);
+    try {
+      await window.storage.set(BUNDLING_ENTRIES_KEY, JSON.stringify(next), false);
+    } catch (e) {
+      // best-effort; the gallery/list save error banner already covers the main storage path
+    }
+  }
+
+  // Applies a hand-typed correction to a bundling card (used for a needsReview card whose
+  // identification came back low-confidence or failed outright) and clears its needsReview flag
+  // once Kaleb has filled in at least a player name.
+  function updateBundlingCard(cardId, patch) {
+    const next = bundlingCards.map((c) => (c.id === cardId ? { ...c, ...patch } : c));
+    persistBundlingCards(next);
+  }
+
+  // Removes a single card from the bundling pool -- e.g. a blank/unusable scan, or a duplicate of
+  // one already grabbed for a different pack.
+  function discardBundlingCard(cardId) {
+    persistBundlingCards(bundlingCards.filter((c) => c.id !== cardId));
+  }
+
+  // Clears out every card from one bundling batch at once -- for when that whole pack has already
+  // been bagged and listed, so there's no more bookkeeping reason to keep it in this pool. Cards
+  // aren't part of the main collection's counts either way (that's the whole point of the separate
+  // pool), so this is just tidying up, never a "sale" that needs recording elsewhere.
+  function discardBundlingJob(bundlingJobId) {
+    persistBundlingCards(bundlingCards.filter((c) => c.bundlingJobId !== bundlingJobId));
   }
 
   // "Mark as bundled" on a suggested (still-ephemeral) Sellers listing: locks in exactly that set
@@ -3735,6 +4252,15 @@ export default function CardLedger() {
         .seller-photo-caption .tile-sub { font-size: 10.5px; line-height: 1.25; }
         .seller-photo-caption .value-cell { font-size: 11.5px; font-weight: 600; }
         .seller-photo-caption:hover .seller-bundle-player { text-decoration: underline; color: var(--navy); }
+        .bundling-photo-caption { display: flex; flex-direction: column; gap: 1px; }
+        .bundling-photo-caption .seller-bundle-player { font-size: 11.5px; line-height: 1.25; }
+        .bundling-photo-caption .tile-sub { font-size: 10.5px; line-height: 1.25; }
+        .bundling-photo-caption .value-cell { font-size: 11.5px; font-weight: 600; }
+        .bundling-photo-caption .link-btn { font-size: 10.5px; margin-top: 2px; }
+        .bundling-photo-item-flagged .seller-photo-wrap { outline: 2px solid #C0392B; outline-offset: -2px; }
+        .bundling-correction { display: flex; flex-direction: column; gap: 4px; }
+        .bundling-correction input { font-size: 11px; padding: 3px 5px; width: 100%; box-sizing: border-box; }
+        .bundling-correction .form-actions { display: flex; justify-content: space-between; align-items: center; }
         .seller-status-pill { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 10px; padding: 2px 9px; }
         .seller-status-bundled { color: var(--gold); border: 1px solid var(--gold); }
         .seller-bundle-header { display: flex; align-items: center; gap: 14px; padding: 8px 14px 10px; border-bottom: 1px solid var(--paper-line); flex-wrap: wrap; }
@@ -4013,6 +4539,7 @@ export default function CardLedger() {
           <button className={activeTab === "yg" ? "active" : ""} onClick={() => setActiveTab("yg")}>Young Guns</button>
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
           <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Selling</button>
+          <button className={activeTab === "bundling" ? "active" : ""} onClick={() => setActiveTab("bundling")}>Bundling</button>
         </div>
 
         {loadError && <div className="banner">Couldn't load your saved collection. Starting from an empty ledger — anything you add now will still be saved going forward.</div>}
@@ -4270,6 +4797,15 @@ export default function CardLedger() {
             onToggleSold={toggleSold}
             onToggleFound={toggleSellerFound}
             onToggleCantFind={toggleSellerCantFind}
+          />
+        ) : activeTab === "bundling" ? (
+          <BundlingPanel
+            cards={bundlingCards}
+            getDisplay={getDisplay}
+            onCardsMayHaveChanged={reloadBundlingCardsFromStorage}
+            onUpdateCard={updateBundlingCard}
+            onDiscardCard={discardBundlingCard}
+            onDiscardJob={discardBundlingJob}
           />
         ) : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
