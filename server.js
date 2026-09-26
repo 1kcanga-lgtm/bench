@@ -15,29 +15,6 @@ const express = require("express");
 const compression = require("compression");
 const Database = require("better-sqlite3");
 
-// Round 42: keep the server alive when a single request goes wrong instead of taking every other
-// in-flight job down with it. This app has no queueing/worker separation -- one Node process
-// handles the storage API, the Anthropic proxy, AND the whole Bulk Auto-Import / Bundling
-// identify pipeline (see bulk-import.js's tickAllJobs interval below). Diagnosed 2026-09-26: a
-// 30-card Bundling upload got interrupted mid-transfer (flaky wifi, backgrounded tab, whatever --
-// base64'd photos as one big JSON body means these requests can run long), and the incoming
-// request stream firing its 'aborted' event mid-body-parse surfaced as an actual uncaught
-// exception (`BadRequestError: request aborted`, thrown from inside the `raw-body` package that
-// express.json() uses internally -- see node_modules/raw-body/index.js's onAborted) rather than
-// a normal 400 response. With no safety net, Node's default behavior for an uncaught exception is
-// to crash the whole process; Docker's restart policy then brings it straight back up, but
-// everything that was mid-flight (every other job's identify progress, not just the one bad
-// request) gets lost, and any request that lands during the few seconds it's restarting can see a
-// stray non-JSON error page. This does NOT fix why an upload gets interrupted in the first place
-// (worth trying a wired connection for a big multi-card upload in the meantime), but it stops one
-// dropped connection from taking the entire app down.
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception -- logging and staying up:", err);
-});
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled promise rejection -- logging and staying up:", err);
-});
-
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "card-ledger.db");
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
@@ -139,20 +116,6 @@ require("./bulk-import")(app, db, {
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// Round 42: Express's own default error handler renders a plain HTML page, and the frontend
-// always expects JSON back from these calls -- that mismatch is the other half of the
-// "Unexpected token '<', "<!DOCTYPE "... is not valid JSON" error (the uncaughtException handler
-// above covers the case where a request dies badly enough to take the whole process down; this
-// covers everything short of that, where Express would otherwise hand back HTML instead). Must be
-// registered after every route/middleware above to actually catch their errors.
-app.use((err, req, res, next) => {
-  if (res.headersSent) return next(err);
-  console.error("Request error:", err);
-  res.status((err && err.status) || 500).json({
-    error: { message: (err && err.message) || "Something went wrong handling that request." },
-  });
 });
 
 app.listen(PORT, () => {
