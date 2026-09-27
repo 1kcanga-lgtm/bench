@@ -2923,6 +2923,39 @@ export default function CardLedger() {
   // button on each, so a batch of bulk-scanned cards that came in sideways/upside-down can be
   // straightened out a click at a time without opening the full detail/edit view for each one.
   const [galleryEditMode, setGalleryEditMode] = useState(false);
+  // Round 46: "Select" mode -- a multi-select bulk-delete tool for the Gallery, so cleaning up a
+  // batch of wrongly-added cards (e.g. Bundling/Auto Import cards that landed in the main
+  // collection by mistake) doesn't mean opening each one's detail view and clicking Edit > Delete
+  // card individually. Mutually exclusive with "Fix rotation" (galleryEditMode) -- both ungroup
+  // duplicate tiles and take over the tile click, so having both on at once would be confusing.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedCardIds, setSelectedCardIds] = useState(() => new Set());
+  const [confirmingBulkDelete, setConfirmingBulkDelete] = useState(false);
+  function toggleSelectMode() {
+    setSelectMode((v) => {
+      const next = !v;
+      if (next) setGalleryEditMode(false);
+      if (!next) setSelectedCardIds(new Set());
+      return next;
+    });
+  }
+  function toggleCardSelected(id) {
+    setSelectedCardIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  // Bulk-delete generalizes the existing single-card handleDelete below -- same persist() call,
+  // just filtering out a whole set of ids instead of one.
+  function handleBulkDelete(ids) {
+    const idSet = new Set(ids);
+    persist(cards.filter((c) => !idSet.has(c.id)));
+    setSelectedCardIds(new Set());
+    setSelectMode(false);
+    setConfirmingBulkDelete(false);
+  }
   // Which gallery tiles' actual photo turned out to be landscape (wider than tall) once loaded --
   // detected client-side from the real image, since the app doesn't store photo dimensions. A
   // landscape card gets a shorter image box (see .tile-img-wrap-landscape) instead of the default
@@ -4387,6 +4420,31 @@ export default function CardLedger() {
         .tile-rotate-btn { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; background: rgba(30,52,72,0.8); color: #fff; border: none; border-radius: 50%; font-size: 15px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
         .tile-rotate-btn:disabled { opacity: 0.6; cursor: default; }
 
+        /* Round 46: "Select" mode -- bulk-delete. Tiles ungroup (same as Fix rotation) so each
+           physical card gets its own checkbox; clicking anywhere on the tile toggles it instead of
+           opening the detail view. */
+        .tile-selectmode { cursor: pointer; }
+        .tile-selected { outline: 3px solid var(--navy); outline-offset: -1px; }
+        .tile-select-check {
+          position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; border-radius: 5px;
+          background: rgba(255,255,255,0.85); border: 2px solid var(--muted); display: flex;
+          align-items: center; justify-content: center; color: #fff;
+        }
+        .tile-select-check-on { background: var(--navy); border-color: var(--navy); }
+        .bulk-action-bar {
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          flex-wrap: wrap; background: #F7F4EA; border: 1px solid var(--paper-line); border-radius: 4px;
+          padding: 10px 14px; margin-bottom: 16px;
+        }
+        .bulk-action-count { font-size: 13.5px; color: var(--muted); font-weight: 600; }
+        .bulk-action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn-danger-solid {
+          background: var(--brick); color: #fff; border: none; padding: 9px 16px; border-radius: 3px;
+          cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 600;
+        }
+        .btn-danger-solid:hover { background: #6f2e22; }
+        .btn-danger-solid:disabled { opacity: 0.5; cursor: default; }
+
         .overlay { position: fixed; inset: 0; background: rgba(20,20,15,0.45); display: flex; align-items: center; justify-content: center; padding: 30px 16px; z-index: 10; overflow-y: auto; }
         .overlay.align-top { align-items: flex-start; padding-top: 40px; }
 
@@ -4665,12 +4723,44 @@ export default function CardLedger() {
                   // Leaving edit mode is the natural "I'm done" moment -- flush any rotate save
                   // still waiting out its debounce instead of leaving it to fire on its own timer.
                   if (galleryEditMode) flushPendingRotateSave();
+                  if (!galleryEditMode) setSelectMode(false);
                   setGalleryEditMode((v) => !v);
                 }}
               >
                 {galleryEditMode ? "Done fixing rotation" : "Fix rotation"}
               </button>
             )}
+            {viewMode === "gallery" && (
+              <button type="button" className={selectMode ? "btn-primary" : "btn-secondary"} onClick={toggleSelectMode}>
+                {selectMode ? "Cancel select" : "Select cards"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {(activeTab === "collection" || activeTab === "home") && viewMode === "gallery" && selectMode && (
+          <div className="bulk-action-bar">
+            <span className="bulk-action-count">
+              {selectedCardIds.size === 0 ? "Select cards to delete" : `${selectedCardIds.size} card${selectedCardIds.size === 1 ? "" : "s"} selected`}
+            </span>
+            <div className="bulk-action-buttons">
+              <button type="button" className="btn-secondary" onClick={() => setSelectedCardIds(new Set(filtered.map((c) => c.id)))}>
+                Select all
+              </button>
+              {selectedCardIds.size > 0 && (
+                <button type="button" className="btn-secondary" onClick={() => setSelectedCardIds(new Set())}>
+                  Clear
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn-danger-solid"
+                disabled={selectedCardIds.size === 0}
+                onClick={() => setConfirmingBulkDelete(true)}
+              >
+                Delete selected{selectedCardIds.size > 0 ? ` (${selectedCardIds.size})` : ""}
+              </button>
+            </div>
           </div>
         )}
 
@@ -4825,10 +4915,37 @@ export default function CardLedger() {
           </div>
         ) : viewMode === "gallery" ? (
           <div className="gallery-grid">
-            {(galleryEditMode
+            {(galleryEditMode || selectMode
               ? filtered.map((c) => ({ card: c, count: 1, key: c.id }))
               : groupedGalleryCards.map((g) => ({ card: g.card, count: g.count, key: g.key }))
             ).map(({ card: c, count, key }) => {
+              if (selectMode) {
+                const pair = getDisplay(c);
+                const shown = pair.front || pair.back;
+                const isSelected = selectedCardIds.has(c.id);
+                return (
+                  <div
+                    className={isSelected ? "tile tile-selectmode tile-selected" : "tile tile-selectmode"}
+                    key={key}
+                    onClick={() => toggleCardSelected(c.id)}
+                  >
+                    <div className={landscapeCardIds.has(c.id) ? "tile-img-wrap tile-img-wrap-landscape" : "tile-img-wrap"}>
+                      <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
+                      <div className={isSelected ? "tile-select-check tile-select-check-on" : "tile-select-check"}>
+                        {isSelected && (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        )}
+                      </div>
+                    </div>
+                    <div className="tile-info">
+                      <div className="tile-player">{c.player}</div>
+                      <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
+                    </div>
+                  </div>
+                );
+              }
               if (galleryEditMode) {
                 return (
                   <div className="tile tile-editmode" key={key}>
@@ -4930,6 +5047,26 @@ export default function CardLedger() {
           </table>
         )}
       </div>
+
+      {confirmingBulkDelete && (
+        <div className="overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingBulkDelete(false); }}>
+          <div className="detail-card">
+            <h2 className="detail-player">Delete {selectedCardIds.size} card{selectedCardIds.size === 1 ? "" : "s"}?</h2>
+            <p className="form-sub">
+              This removes {selectedCardIds.size === 1 ? "this card" : "these cards"} from your collection for good -- there's no undo.
+            </p>
+            <div className="form-actions">
+              <span />
+              <div className="form-actions-right">
+                <button type="button" className="btn-secondary" onClick={() => setConfirmingBulkDelete(false)}>Cancel</button>
+                <button type="button" className="btn-danger-solid" onClick={() => handleBulkDelete(Array.from(selectedCardIds))}>
+                  Delete {selectedCardIds.size} card{selectedCardIds.size === 1 ? "" : "s"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {checklistInfoEntry && (
         <div className="overlay" onClick={(e) => { if (e.target === e.currentTarget) setChecklistInfoEntry(null); }}>
