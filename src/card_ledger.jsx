@@ -2926,26 +2926,70 @@ export default function CardLedger() {
   // Round 46: "Select" mode -- a multi-select bulk-delete tool for the Gallery, so cleaning up a
   // batch of wrongly-added cards (e.g. Bundling/Auto Import cards that landed in the main
   // collection by mistake) doesn't mean opening each one's detail view and clicking Edit > Delete
-  // card individually. Mutually exclusive with "Fix rotation" (galleryEditMode) -- both ungroup
-  // duplicate tiles and take over the tile click, so having both on at once would be confusing.
+  // card individually. Mutually exclusive with "Fix rotation" (galleryEditMode).
+  //
+  // Round 46c -- IMPORTANT, learned the hard way: this deliberately renders the same COLLAPSED
+  // groupedGalleryCards tiles the normal Gallery view already uses (one tile per distinct
+  // player+year+brand+set+cardNumber, with a x2/x3 badge), NOT the ungrouped one-tile-per-physical-
+  // copy view that "Fix rotation" uses. An earlier version of this ungrouped everything the same
+  // way Fix rotation does, and with Kaleb's collection at 2500+ cards that meant rendering every
+  // single physical card's photo individually the moment Select mode was turned on -- Kaleb hit a
+  // Chrome renderer "Aw, Snap! Error code: Out of Memory" crash from it TWICE, once selecting 112
+  // cards and once selecting only 5, which confirms the crash trigger was simply having Select mode
+  // open on the full collection, not the size of the delete itself. Using the same collapsed view
+  // the everyday Gallery already renders without issue keeps Select mode's memory footprint no
+  // higher than browsing normally. The tradeoff: clicking a tile selects/deletes every physical
+  // copy in that group together, not one specific duplicate -- acceptable since the actual use case
+  // (cleaning out a wrongly-imported batch) doesn't need per-duplicate precision, and grouped cards
+  // are shown with their x2/x3 count so it's clear more than one card is being removed.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedCardIds, setSelectedCardIds] = useState(() => new Set());
   const [confirmingBulkDelete, setConfirmingBulkDelete] = useState(false);
+  // Shift-click range select (Kaleb's request, round 46b): the index (within groupedGalleryCards'
+  // order, same order Select mode's tiles render in) of the last tile clicked WITHOUT shift held. A
+  // plain click always moves this anchor; a shift-click leaves it where it is and selects every
+  // group between the anchor and the shift-clicked tile, same "click one end, shift-click the
+  // other" convention as a file browser or Gmail's inbox. Cleared whenever select mode is turned
+  // off, since a stale index from a previous session in the mode could point at the wrong tile once
+  // the list changes.
+  const [selectAnchorIndex, setSelectAnchorIndex] = useState(null);
   function toggleSelectMode() {
     setSelectMode((v) => {
       const next = !v;
       if (next) setGalleryEditMode(false);
       if (!next) setSelectedCardIds(new Set());
+      setSelectAnchorIndex(null);
       return next;
     });
   }
-  function toggleCardSelected(id) {
+  // Selects/deselects every physical copy in one duplicate group at once (see the big comment on
+  // selectMode above for why groups, not individual copies).
+  function toggleGroupSelected(copies) {
     setSelectedCardIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      const allSelected = copies.every((c) => next.has(c.id));
+      if (allSelected) copies.forEach((c) => next.delete(c.id));
+      else copies.forEach((c) => next.add(c.id));
       return next;
     });
+  }
+  function handleTileSelectClick(copies, index, shiftHeld) {
+    if (shiftHeld && selectAnchorIndex !== null) {
+      const start = Math.min(selectAnchorIndex, index);
+      const end = Math.max(selectAnchorIndex, index);
+      const rangeIds = groupedGalleryCards.slice(start, end + 1).flatMap((g) => g.copies.map((c) => c.id));
+      setSelectedCardIds((prev) => {
+        const next = new Set(prev);
+        rangeIds.forEach((rid) => next.add(rid));
+        return next;
+      });
+      // Anchor stays put on a shift-click, same as most file browsers -- lets Kaleb shift-click a
+      // third tile to extend/shrink the same range instead of starting a new one from wherever he
+      // last clicked.
+    } else {
+      toggleGroupSelected(copies);
+      setSelectAnchorIndex(index);
+    }
   }
   // Bulk-delete generalizes the existing single-card handleDelete below -- same persist() call,
   // just filtering out a whole set of ids instead of one.
@@ -4741,7 +4785,9 @@ export default function CardLedger() {
         {(activeTab === "collection" || activeTab === "home") && viewMode === "gallery" && selectMode && (
           <div className="bulk-action-bar">
             <span className="bulk-action-count">
-              {selectedCardIds.size === 0 ? "Select cards to delete" : `${selectedCardIds.size} card${selectedCardIds.size === 1 ? "" : "s"} selected`}
+              {selectedCardIds.size === 0
+                ? "Select cards to delete -- click one, then shift-click another to grab everything in between"
+                : `${selectedCardIds.size} card${selectedCardIds.size === 1 ? "" : "s"} selected`}
             </span>
             <div className="bulk-action-buttons">
               <button type="button" className="btn-secondary" onClick={() => setSelectedCardIds(new Set(filtered.map((c) => c.id)))}>
@@ -4915,19 +4961,24 @@ export default function CardLedger() {
           </div>
         ) : viewMode === "gallery" ? (
           <div className="gallery-grid">
-            {(galleryEditMode || selectMode
-              ? filtered.map((c) => ({ card: c, count: 1, key: c.id }))
-              : groupedGalleryCards.map((g) => ({ card: g.card, count: g.count, key: g.key }))
-            ).map(({ card: c, count, key }) => {
+            {(galleryEditMode
+              ? filtered.map((c) => ({ card: c, count: 1, key: c.id, copies: [c] }))
+              : groupedGalleryCards.map((g) => ({ card: g.card, count: g.count, key: g.key, copies: g.copies }))
+            ).map(({ card: c, count, key, copies }, tileIndex) => {
               if (selectMode) {
+                // Round 46c: select mode reuses the same collapsed/grouped tiles as the normal
+                // Gallery view (see the big comment on the selectMode state above) -- clicking a
+                // tile toggles every physical copy in that group together, so a x2/x3 duplicate
+                // group is selected/deleted as one unit rather than forcing a much heavier
+                // ungrouped render of the whole collection.
                 const pair = getDisplay(c);
                 const shown = pair.front || pair.back;
-                const isSelected = selectedCardIds.has(c.id);
+                const isSelected = copies.every((cc) => selectedCardIds.has(cc.id));
                 return (
                   <div
                     className={isSelected ? "tile tile-selectmode tile-selected" : "tile tile-selectmode"}
                     key={key}
-                    onClick={() => toggleCardSelected(c.id)}
+                    onClick={(e) => handleTileSelectClick(copies, tileIndex, e.shiftKey)}
                   >
                     <div className={landscapeCardIds.has(c.id) ? "tile-img-wrap tile-img-wrap-landscape" : "tile-img-wrap"}>
                       <CardImage src={shown} alt={c.player} fallbackLabel="No photo yet" />
@@ -4942,6 +4993,7 @@ export default function CardLedger() {
                     <div className="tile-info">
                       <div className="tile-player">{c.player}</div>
                       <div className="tile-sub">{[c.year, c.brand, c.set].filter(Boolean).join(" · ")}</div>
+                      {count > 1 && <span className="tile-dupe-badge" title={`${count} copies of this card -- selecting deletes all ${count}`}>×{count}</span>}
                     </div>
                   </div>
                 );
