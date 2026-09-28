@@ -477,7 +477,7 @@ async function rotateForStorage(item, parsed) {
 }
 
 module.exports = function registerBulkImport(app, db, opts) {
-  const { importRoot, getApiKey, anthropicVersion } = opts;
+  const { importRoot, getApiKey, anthropicVersion, savePhotoFile } = opts;
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS bulk_jobs (
@@ -594,8 +594,37 @@ module.exports = function registerBulkImport(app, db, opts) {
     `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   );
 
-  function appendCardsToLedger(entries) {
-    if (!entries.length) return;
+  // Card photos live as JPEG files on disk (see server.js's savePhotoFile), not as base64 inside
+  // the card JSON. Both append functions below run every entry through this first, so any path
+  // that adds a card -- now or later -- stores file URLs without each call site remembering to.
+  // If server.js ever stops passing savePhotoFile in, entries are stored as-is rather than failing.
+  const PHOTO_FIELDS = ["personalFront", "personalBack", "purchasePhotoFront", "purchasePhotoBack"];
+  async function storePhotosAsFiles(entries) {
+    if (typeof savePhotoFile !== "function") return entries;
+    const out = [];
+    for (const entry of entries) {
+      const next = { ...entry };
+      for (const key of PHOTO_FIELDS) {
+        if (typeof next[key] === "string" && next[key].startsWith("data:")) {
+          next[key] = await savePhotoFile(next[key], null);
+        }
+      }
+      out.push(next);
+    }
+    return out;
+  }
+  // Once an item's photos have been copied out to files (on save) or are no longer needed (on
+  // discard), null the base64 copies here -- otherwise they sit in these tables forever as dead
+  // weight. Only for items that are finished: a job retry only resumes items not yet "saved", and
+  // a review retry reads the job item of a card still in review, never one of these.
+  const clearItemPhotos = db.prepare(`UPDATE bulk_job_items SET front_api=NULL, back_api=NULL, front_storage=NULL, back_storage=NULL WHERE id=?`);
+  const clearReviewPhotos = db.prepare(`UPDATE bulk_review_items SET front_storage=NULL, back_storage=NULL WHERE id=?`);
+
+  async function appendCardsToLedger(rawEntries) {
+    if (!rawEntries.length) return;
+    // Photo files are written first; everything after this await is synchronous, so the
+    // read-modify-write below stays as race-free as it was before.
+    const entries = await storePhotosAsFiles(rawEntries);
     // Read-modify-write against the same "card-ledger-entries" key the interactive app itself
     // uses. better-sqlite3 is synchronous, so there's no await between this read and write --
     // safe against races from *this* process, though a save from the browser landing in the
@@ -610,8 +639,9 @@ module.exports = function registerBulkImport(app, db, opts) {
   // Round 40 (Bundling tab): a completely separate kv key/pool from the main collection, per
   // Kaleb's choice -- these cards are just being grouped and priced for a bundle listing, not
   // added to his real bookkeeping, so they never touch "card-ledger-entries" or its counts.
-  function appendCardsToBundlingLedger(entries) {
-    if (!entries.length) return;
+  async function appendCardsToBundlingLedger(rawEntries) {
+    if (!rawEntries.length) return;
+    const entries = await storePhotosAsFiles(rawEntries);
     const row = getStorageStmt.get("card-ledger-bundling-entries");
     const current = row && row.value ? JSON.parse(row.value) : [];
     const next = current.concat(entries);
@@ -760,7 +790,7 @@ module.exports = function registerBulkImport(app, db, opts) {
 
   // Save a reviewed item (Kaleb has edited/confirmed the fields client-side) straight into the
   // ledger, then mark the review row resolved.
-  app.post("/api/bulk-import/review/:id/save", (req, res) => {
+  app.post("/api/bulk-import/review/:id/save", async (req, res) => {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     const form = req.body || {};
@@ -789,8 +819,13 @@ module.exports = function registerBulkImport(app, db, opts) {
       bulkAutoImport: true,
     };
     if (!entry.player) return res.status(400).json({ error: { message: "Player name is required." } });
-    appendCardsToLedger([entry]);
+    try {
+      await appendCardsToLedger([entry]);
+    } catch (e) {
+      return res.status(500).json({ error: { message: "Couldn't save this card's photos: " + ((e && e.message) || e) } });
+    }
     setReviewStatus.run("resolved", row.id);
+    clearReviewPhotos.run(row.id);
     res.json({ ok: true });
   });
 
@@ -798,6 +833,7 @@ module.exports = function registerBulkImport(app, db, opts) {
     const row = getReview.get(req.params.id);
     if (!row) return res.status(404).json({ error: { message: "review item not found" } });
     setReviewStatus.run("discarded", row.id);
+    clearReviewPhotos.run(row.id);
     res.json({ ok: true });
   });
 
@@ -901,8 +937,9 @@ module.exports = function registerBulkImport(app, db, opts) {
       // came back low even after search -- either way it goes in; low confidence just gets
       // flagged for a quick look in the Bundling tab rather than blocking the pool.
       entry.needsReview = lowConfidence;
-      appendCardsToBundlingLedger([entry]);
+      await appendCardsToBundlingLedger([entry]);
       setItemStatus.run("saved", item.id);
+      clearItemPhotos.run(item.id);
       return { toReview: lowConfidence, saved: true };
     }
 
@@ -930,8 +967,9 @@ module.exports = function registerBulkImport(app, db, opts) {
       rotated.front,
       rotated.back
     );
-    appendCardsToLedger([entry]);
+    await appendCardsToLedger([entry]);
     setItemStatus.run("saved", item.id);
+    clearItemPhotos.run(item.id);
     return { toReview: false, saved: true };
   }
 
@@ -946,8 +984,9 @@ module.exports = function registerBulkImport(app, db, opts) {
     if (job.purpose === "bundling") {
       const entry = buildBundlingPlaceholderEntry(item, errMsg);
       entry.bundlingJobId = job.id;
-      appendCardsToBundlingLedger([entry]);
+      await appendCardsToBundlingLedger([entry]);
       setItemStatus.run("saved", item.id);
+      clearItemPhotos.run(item.id);
       return { toReview: true, saved: true };
     }
     insertReview.run(

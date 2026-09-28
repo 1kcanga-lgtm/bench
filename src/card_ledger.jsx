@@ -678,6 +678,82 @@ function rotateDataUrl(dataUrl, degrees) {
   });
 }
 
+// --- Card photos are stored as JPEG files on the server (server.js's /api/photos), not as base64
+// inside the card JSON -- a collection full of embedded photos is what grew the saved blob to
+// hundreds of MB and ran the server out of memory. Every scan/rotate/edit path still produces
+// data: URLs in memory exactly as before; the two pool savers (saveCollectionToServer and
+// persistBundlingCards) run the cards through filePhotosInCards right before writing, so no
+// individual edit path has to remember to upload anything. ---
+const PHOTO_FIELDS = ["personalFront", "personalBack", "purchasePhotoFront", "purchasePhotoBack"];
+
+// Keyed by the data: URL itself, so two overlapping saves of the same not-yet-uploaded photo
+// (e.g. a debounced rotate save racing an ordinary save) share one upload instead of writing two
+// files. A failed upload is dropped from the cache so the next save tries again.
+const photoUploads = new Map();
+function uploadPhoto(dataUrl) {
+  if (!photoUploads.has(dataUrl)) {
+    const p = fetch("/api/photos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("photo upload failed");
+        return (await res.json()).url;
+      })
+      .catch((e) => {
+        photoUploads.delete(dataUrl);
+        throw e;
+      });
+    photoUploads.set(dataUrl, p);
+  }
+  return photoUploads.get(dataUrl);
+}
+
+// Returns the cards with every data: photo swapped for its uploaded file URL, plus the
+// data-URL -> file-URL swaps made (for applyPhotoSwaps below). A photo whose upload fails is left
+// as base64 rather than failing the whole save -- worst case is the old embedded behavior for that
+// one photo, and the next save retries it.
+async function filePhotosInCards(cards) {
+  const swaps = new Map();
+  const out = [];
+  for (const card of cards) {
+    let next = card;
+    for (const key of PHOTO_FIELDS) {
+      const v = card[key];
+      if (typeof v !== "string" || !v.startsWith("data:")) continue;
+      try {
+        const url = swaps.get(v) || (await uploadPhoto(v));
+        swaps.set(v, url);
+        if (next === card) next = { ...card };
+        next[key] = url;
+      } catch (e) {
+        // keep the data: URL for this one; see comment above
+      }
+    }
+    out.push(next);
+  }
+  return { cards: out, swaps };
+}
+
+// Puts uploaded file URLs into in-memory state, but only where a field still holds the exact
+// data: URL that was uploaded -- anything edited again while the upload was in flight is left
+// alone (its own save will upload the newer version).
+function applyPhotoSwaps(cards, swaps) {
+  if (!swaps.size) return cards;
+  return cards.map((c) => {
+    let next = c;
+    for (const key of PHOTO_FIELDS) {
+      const url = typeof c[key] === "string" ? swaps.get(c[key]) : undefined;
+      if (url) {
+        if (next === c) next = { ...c };
+        next[key] = url;
+      }
+    }
+    return next;
+  });
+}
+
 // --- Watched scan folder: a directory handle (from the File System Access API) can't be
 // JSON-stringified, so it's kept in IndexedDB rather than window.storage. Every call here is
 // wrapped by the caller in a feature check (window.showDirectoryPicker + indexedDB both present)
@@ -3105,7 +3181,9 @@ export default function CardLedger() {
   // persist(), unchanged.
   async function saveCollectionToServer(next) {
     try {
-      const res = await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
+      const { cards: toSave, swaps } = await filePhotosInCards(next);
+      if (swaps.size) setCards((prev) => applyPhotoSwaps(prev, swaps));
+      const res = await window.storage.set(STORAGE_KEY, JSON.stringify(toSave), false);
       setSaveError(!res);
     } catch (e) {
       setSaveError(true);
@@ -3301,7 +3379,9 @@ export default function CardLedger() {
   async function persistBundlingCards(next) {
     setBundlingCards(next);
     try {
-      await window.storage.set(BUNDLING_ENTRIES_KEY, JSON.stringify(next), false);
+      const { cards: toSave, swaps } = await filePhotosInCards(next);
+      if (swaps.size) setBundlingCards((prev) => applyPhotoSwaps(prev, swaps));
+      await window.storage.set(BUNDLING_ENTRIES_KEY, JSON.stringify(toSave), false);
     } catch (e) {
       // best-effort; the gallery/list save error banner already covers the main storage path
     }

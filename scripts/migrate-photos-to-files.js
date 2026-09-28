@@ -7,7 +7,8 @@
 // Also backfills the orphaned duplicate base64 that's been accumulating in bulk_job_items and
 // bulk_review_items (their bytes get copied elsewhere -- the main ledger, or a review row -- but
 // were never cleared from the original row). Only rows in a TERMINAL status get cleared here
-// (bulk_job_items: 'saved'/'review'; bulk_review_items: 'resolved'/'discarded') -- anything still
+// (bulk_job_items: 'saved' only -- a 'review' item's photos are what the review queue's Retry button
+// resubmits; bulk_review_items: 'resolved'/'discarded') -- anything still
 // in flight keeps its bytes, since the tick loop or the review UI still needs them.
 //
 // Idempotent and safe to re-run: already-migrated fields (already a URL, not a data: URL) are
@@ -37,15 +38,19 @@ function isAlreadyUrl(v) {
   return typeof v === "string" && (v.startsWith("/photos/") || v.startsWith("http://") || v.startsWith("https://"));
 }
 
-async function migrateLedgerPhotos(db, savePhotoFile) {
-  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get("card-ledger-entries");
+// Every kv key holding an array of cards with photo fields: the main collection, and the Bundling
+// tab's separate pool (added after this script was first written).
+const CARD_POOL_KEYS = ["card-ledger-entries", "card-ledger-bundling-entries"];
+
+async function migrateLedgerPhotos(db, savePhotoFile, key) {
+  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(key);
   if (!row || !row.value) {
-    console.log("No card-ledger-entries found -- nothing to migrate there.");
+    console.log(`No ${key} found -- nothing to migrate there.`);
     return { filesWritten: 0 };
   }
 
   const cards = JSON.parse(row.value);
-  console.log(`Loaded ${cards.length} cards from ${DB_PATH}`);
+  console.log(`Loaded ${cards.length} cards from ${key} in ${DB_PATH}`);
 
   let candidateCount = 0;
   let candidateBytes = 0;
@@ -70,7 +75,7 @@ async function migrateLedgerPhotos(db, savePhotoFile) {
   if (!APPLY || candidateCount === 0) return { filesWritten: 0 };
 
   // Back up the raw JSON string before mutating anything, same pattern as dedupe-cards.js.
-  const backupPath = path.join(DATA_DIR, `card-ledger-entries-backup-${Date.now()}.json`);
+  const backupPath = path.join(DATA_DIR, `${key}-backup-${Date.now()}.json`);
   fs.writeFileSync(backupPath, row.value);
   console.log(`Backed up current entries to ${backupPath}`);
 
@@ -86,12 +91,12 @@ async function migrateLedgerPhotos(db, savePhotoFile) {
 
   db.prepare(
     `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).run("card-ledger-entries", JSON.stringify(cards));
-  console.log(`Wrote ${filesWritten} photo file(s), updated card-ledger-entries.`);
+  ).run(key, JSON.stringify(cards));
+  console.log(`Wrote ${filesWritten} photo file(s), updated ${key}.`);
 
   // Verification: re-read what we just wrote, confirm no embedded base64 remains and every
   // referenced file actually exists on disk.
-  const verifyCards = JSON.parse(db.prepare("SELECT value FROM kv WHERE key = ?").get("card-ledger-entries").value);
+  const verifyCards = JSON.parse(db.prepare("SELECT value FROM kv WHERE key = ?").get(key).value);
   let stillEmbedded = 0;
   let missingFiles = 0;
   for (const card of verifyCards) {
@@ -118,7 +123,7 @@ function reclaimBulkTableBytes(db) {
     .prepare(
       `SELECT COALESCE(SUM(LENGTH(front_api)),0) + COALESCE(SUM(LENGTH(back_api)),0) +
               COALESCE(SUM(LENGTH(front_storage)),0) + COALESCE(SUM(LENGTH(back_storage)),0) AS bytes
-       FROM bulk_job_items WHERE status IN ('saved','review')`
+       FROM bulk_job_items WHERE status = 'saved'`
     )
     .get().bytes;
   const reviewBytes = db
@@ -135,7 +140,7 @@ function reclaimBulkTableBytes(db) {
   const jobResult = db
     .prepare(
       `UPDATE bulk_job_items SET front_api=NULL, back_api=NULL, front_storage=NULL, back_storage=NULL
-       WHERE status IN ('saved','review') AND (front_api IS NOT NULL OR back_api IS NOT NULL OR front_storage IS NOT NULL OR back_storage IS NOT NULL)`
+       WHERE status = 'saved' AND (front_api IS NOT NULL OR back_api IS NOT NULL OR front_storage IS NOT NULL OR back_storage IS NOT NULL)`
     )
     .run();
   const reviewResult = db
@@ -158,7 +163,7 @@ async function main() {
     console.log(`DB snapshot written to ${backupDbPath} -- restore this file to roll back.`);
   }
 
-  await migrateLedgerPhotos(db, savePhotoFile);
+  for (const key of CARD_POOL_KEYS) await migrateLedgerPhotos(db, savePhotoFile, key);
   reclaimBulkTableBytes(db);
 
   if (!APPLY) {
