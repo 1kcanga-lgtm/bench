@@ -8,8 +8,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "better-sqlite3": "^11.3.0",
+    "compression": "^1.8.2",
+    "express": "^4.19.2",
     "sharp": "^0.33.5"
   },
   "devDependencies": {

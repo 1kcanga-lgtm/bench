@@ -45,6 +45,9 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - PORT=8080
       - IMPORT_ROOT=/data/import
+      # Raise Node's heap cap above its ~2GB default -- the collection record is large enough to
+      # hit it and crash with "JavaScript heap out of memory".
+      - NODE_OPTIONS=--max-old-space-size=3072
     volumes:
       # Everything you scan and log lives in this one file -- see DATA_DIR note above.
       - ${DATA_DIR:-/opt/bench-data}:/app/data
