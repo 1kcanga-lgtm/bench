@@ -1428,7 +1428,7 @@ function autoImportFolderLabel(fileList) {
   return rel.split("/")[0] || "uploaded folder";
 }
 
-function AutoImportPanel({ onCardsMayHaveChanged }) {
+function AutoImportPanel({ onCardsMayHaveChanged, isActive }) {
   const [folderInput, setFolderInput] = useState("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
@@ -1455,12 +1455,19 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
     }
   }
 
+  // Round 46d: this panel is now always mounted (see the render-side comment near where it's
+  // used) so an in-progress upload survives Kaleb switching to a different app tab and back --
+  // but it should only actually poll the server while Auto Import is the tab he's looking at,
+  // both to avoid pointless background traffic and because onCardsMayHaveChanged reloads the
+  // WHOLE collection, which isn't free. isActive flips true again the moment he switches back,
+  // which also immediately calls refresh() to catch up on whatever happened while he was away.
   useEffect(() => {
+    if (!isActive) return;
     refresh();
     const interval = setInterval(refresh, 6000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isActive]);
 
   // Round 32: an errored job (most commonly: the Anthropic account ran out of API credit
   // mid-run) sits stuck forever on its own -- the background tick loop only ever re-processes
@@ -1731,7 +1738,7 @@ function AutoImportPanel({ onCardsMayHaveChanged }) {
 // CardLedger level) rather than the main collection -- they never touch its totals, checklists, or
 // counts, and "Clear bundle" below just empties this tab's pool once that pack is bagged and
 // listed, no different from throwing away a shipping label once it's used.
-function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard, onDiscardCard, onDiscardJob }) {
+function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard, onDiscardCard, onDiscardJob, isActive }) {
   const [folderInput, setFolderInput] = useState("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
@@ -1762,12 +1769,16 @@ function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard,
     }
   }
 
+  // Round 46d: same reasoning as AutoImportPanel above -- always mounted now so an in-progress
+  // upload survives switching tabs and back, but only actually polls while Bundling is the tab
+  // in view.
   useEffect(() => {
+    if (!isActive) return;
     refresh();
     const interval = setInterval(refresh, 6000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isActive]);
 
   async function retryJob(jobId) {
     setRetryingJobId(jobId);
@@ -4996,9 +5007,8 @@ export default function CardLedger() {
             onCardsMayHaveChanged={reloadCardsFromStorage}
             getDisplay={getDisplay}
           />
-        ) : activeTab === "autoimport" ? (
-          <AutoImportPanel onCardsMayHaveChanged={reloadCardsFromStorage} />
-        ) : activeTab === "sellers" ? (
+        ) : activeTab === "autoimport" ? null // rendered always-mounted below, see round 46d comment
+        : activeTab === "sellers" ? (
           <SellerPanel
             cards={sellerEligibleCards}
             bundles={sellerBundles}
@@ -5014,16 +5024,8 @@ export default function CardLedger() {
             onToggleFound={toggleSellerFound}
             onToggleCantFind={toggleSellerCantFind}
           />
-        ) : activeTab === "bundling" ? (
-          <BundlingPanel
-            cards={bundlingCards}
-            getDisplay={getDisplay}
-            onCardsMayHaveChanged={reloadBundlingCardsFromStorage}
-            onUpdateCard={updateBundlingCard}
-            onDiscardCard={discardBundlingCard}
-            onDiscardJob={discardBundlingJob}
-          />
-        ) : !loaded ? (
+        ) : activeTab === "bundling" ? null // rendered always-mounted below, see round 46d comment
+        : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
@@ -5178,6 +5180,37 @@ export default function CardLedger() {
             </tbody>
           </table>
         )}
+
+        {/* Round 46d: Auto Import and Bundling are ALWAYS mounted (just hidden via CSS when not
+            the active tab) instead of being created/destroyed by the ternary above like every
+            other tab. Kaleb reported that switching to a different app tab mid-upload and coming
+            back made "the upload stop" -- and this almost certainly also explains the still-
+            unexplained partial-completion bug from round 45 (Test Bundle showing "1 of 3",
+            Blackhawks showing "2 of 50", both marked done with nothing flagged). Both panels'
+            uploadFolder is a client-side loop (resize each photo, POST a chunk, repeat) that lives
+            entirely in that component's own local state/closures -- conditionally unmounting the
+            component when Kaleb clicked to another tab meant a fresh instance with reset state
+            greeted him on return, with no way to tell whether the old instance's loop was still
+            quietly running or had been abandoned mid-folder. Identification itself was already
+            confirmed safe against this (bulk-import.js runs its own tickAllJobs on a server-side
+            setInterval every 45s, independent of any browser tab), but the UPLOAD step wasn't.
+            Keeping both panels mounted the whole time means the upload loop's owning component
+            instance is never torn down by an internal tab switch, and the progress bar/status
+            correctly reflects whatever is actually still happening when you switch back. */}
+        <div style={{ display: activeTab === "autoimport" ? "block" : "none" }}>
+          <AutoImportPanel onCardsMayHaveChanged={reloadCardsFromStorage} isActive={activeTab === "autoimport"} />
+        </div>
+        <div style={{ display: activeTab === "bundling" ? "block" : "none" }}>
+          <BundlingPanel
+            cards={bundlingCards}
+            getDisplay={getDisplay}
+            onCardsMayHaveChanged={reloadBundlingCardsFromStorage}
+            onUpdateCard={updateBundlingCard}
+            onDiscardCard={discardBundlingCard}
+            onDiscardJob={discardBundlingJob}
+            isActive={activeTab === "bundling"}
+          />
+        </div>
       </div>
 
       {confirmingBulkDelete && (
