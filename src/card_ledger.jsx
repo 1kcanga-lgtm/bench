@@ -2965,6 +2965,174 @@ function SellerPanel({ cards, bundles, foundIds, cantFindIds, getDisplay, onOpen
   );
 }
 
+// Rounds to the nearest whole dollar and formats without cents -- a "$347.82 lot" reads like a
+// spreadsheet, not a listing; every price in a Team Lots blurb goes through this instead of
+// money() (which keeps cents, right for a single card's book value elsewhere in the app).
+function moneyWhole(n) {
+  return Math.round(Number(n) || 0).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+
+// Joins a list of names the way a person would say them out loud: "A", "A and B", "A, B, and C" --
+// used for the standout-cards clause in buildTeamLotBlurb below.
+function joinWithAnd(items) {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+// Round 47: Kaleb's own spec, pasted in almost verbatim from a feature-request doc he worked out
+// with another Claude conversation (his eBay lot-valuation chat) -- see the "eBay team-lot listing
+// helper" doc for the full original ask. This is Phase 1 only (the value-comparison blurb/table);
+// the follow-up eBay Sell API / OAuth / auto-listing piece he scoped as Phase 2 is intentionally
+// NOT built here -- it needs real backend work (OAuth token storage, calls to eBay's Inventory
+// API) once this simpler piece is proven out, not attempted alongside it.
+function buildTeamLotBlurb(lot, finalPrice) {
+  const standouts = lot.topCards.slice(0, 3).map((c) => `${c.player} (~${moneyWhole(c.value)})`);
+  const standoutsClause = standouts.length ? ` — including standout${standouts.length === 1 ? "" : "s"} like ${joinWithAnd(standouts)}.` : ".";
+  return (
+    `This lot includes ${lot.count} card${lot.count === 1 ? "" : "s"} from the ${lot.team}. ` +
+    `Individually, these cards are valued at approximately ${moneyWhole(lot.total)}${standoutsClause} ` +
+    `Listed here as a full lot for ${moneyWhole(finalPrice)}.`
+  );
+}
+
+// Groups Kaleb's sale-eligible cards (never his own Stars/North Stars keepers -- see
+// sellerEligibleCards below, which this is always fed) by printed team, into the "~50 team lots"
+// unit he actually sells in, as distinct from Sellers' own auto-balanced ~30-card MIXED packs
+// (buildSellerBundles above) -- a real team can run well past 30-50 cards on its own, and Kaleb's
+// own framing of this feature ("~50 team lots (30-50 cards each)") is one lot per team, full stop,
+// not a re-slice of the auto-balancer's packs. Cards already sold, or with no team on file at all
+// (can't meaningfully lot those), are left out.
+function buildTeamLots(cards) {
+  const byTeam = new Map();
+  for (const c of cards) {
+    if (c.sold || !c.team) continue;
+    if (!byTeam.has(c.team)) byTeam.set(c.team, []);
+    byTeam.get(c.team).push(c);
+  }
+  return Array.from(byTeam.entries())
+    .map(([team, teamCards]) => {
+      const total = teamCards.reduce((s, c) => s + (Number(c.value) || 0), 0);
+      // Only a card with an actual tracked value is worth calling out by name as a "standout" --
+      // an unpriced card sorting to the top by coincidence (missing values sort as 0) would make
+      // for a strange listing ("standouts like [Some Guy] (~$0)").
+      const topCards = teamCards
+        .filter((c) => Number(c.value) > 0)
+        .sort((a, b) => (b.value || 0) - (a.value || 0))
+        .slice(0, 5);
+      return { team, cards: teamCards, count: teamCards.length, total, topCards };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
+function TeamLotsPanel({ cards }) {
+  const [discountPct, setDiscountPct] = useState(40);
+  const [priceOverrides, setPriceOverrides] = useState({});
+  const [copiedTeam, setCopiedTeam] = useState(null);
+
+  const safeDiscount = Math.min(90, Math.max(0, Number(discountPct) || 0));
+  const lots = useMemo(() => buildTeamLots(cards), [cards]);
+
+  const grandTotal = useMemo(() => lots.reduce((s, l) => s + l.total, 0), [lots]);
+
+  function suggestedPriceFor(lot) {
+    return Math.round(lot.total * (1 - safeDiscount / 100));
+  }
+  function finalPriceFor(lot) {
+    const override = priceOverrides[lot.team];
+    if (override !== undefined && override !== "") {
+      const n = Number(override);
+      if (!isNaN(n)) return n;
+    }
+    return suggestedPriceFor(lot);
+  }
+  function setOverride(team, value) {
+    setPriceOverrides((prev) => ({ ...prev, [team]: value }));
+  }
+
+  function copyBlurb(lot) {
+    const blurb = buildTeamLotBlurb(lot, finalPriceFor(lot));
+    try {
+      navigator.clipboard.writeText(blurb);
+      setCopiedTeam(lot.team);
+      setTimeout(() => setCopiedTeam((t) => (t === lot.team ? null : t)), 2000);
+    } catch (e) {
+      // clipboard access can be blocked in some contexts -- the blurb text is still fully visible
+      // in the table either way, so this is a convenience, not something the feature depends on.
+    }
+  }
+
+  return (
+    <div className="team-lots-wrap">
+      <p className="checklist-intro">
+        One row per team currently in your sell pile (anything not part of your own Stars/North Stars collection) --
+        the total is every one of that team's tracked card values added up, and the suggested price applies the
+        discount below to that total. Override any team's price by typing over it; the blurb updates to match.
+        This is a starting point to paste into eBay, not a final price -- adjust anything that looks off before you list it.
+      </p>
+
+      <div className="controls">
+        <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          Default discount off individual value: <strong>{safeDiscount}%</strong>
+          <input type="range" min="0" max="90" value={discountPct} onChange={(e) => setDiscountPct(e.target.value)} />
+        </label>
+      </div>
+
+      <div className="team-subtotal">
+        <strong>{lots.length}</strong> team lot{lots.length === 1 ? "" : "s"} · {money(grandTotal)} total individual value across all of them
+      </div>
+
+      {lots.length === 0 ? (
+        <div className="empty-state"><p>Nothing to lot yet -- cards show up here once they're identified with a team and aren't part of your own Stars/North Stars collection.</p></div>
+      ) : (
+        <table className="team-lots-table">
+          <thead>
+            <tr>
+              <th>Team</th>
+              <th>Cards</th>
+              <th>Individual value</th>
+              <th>Lot price</th>
+              <th>Blurb</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {lots.map((lot) => {
+              const suggested = suggestedPriceFor(lot);
+              const finalPrice = finalPriceFor(lot);
+              const blurb = buildTeamLotBlurb(lot, finalPrice);
+              const overrideValue = priceOverrides[lot.team];
+              return (
+                <tr key={lot.team} className="team-lot-row">
+                  <td><strong>{lot.team}</strong></td>
+                  <td>{lot.count}</td>
+                  <td className="value-cell">{money(lot.total)}</td>
+                  <td>
+                    <input
+                      type="number"
+                      className="team-lot-price-input"
+                      value={overrideValue !== undefined ? overrideValue : suggested}
+                      onChange={(e) => setOverride(lot.team, e.target.value)}
+                    />
+                  </td>
+                  <td>
+                    <textarea className="team-lot-blurb" readOnly value={blurb} rows={3} onClick={(e) => e.target.select()} />
+                  </td>
+                  <td>
+                    <button type="button" className="btn-secondary" onClick={() => copyBlurb(lot)}>
+                      {copiedTeam === lot.team ? "Copied!" : "Copy"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 export default function CardLedger() {
   const [cards, setCards] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -4506,6 +4674,22 @@ export default function CardLedger() {
         .sub-cell { color: var(--muted); font-size: 12.5px; }
         .value-cell { font-family: Georgia, serif; font-weight: 700; color: var(--green); }
 
+        /* Round 47: Team Lots -- reuses the generic table/.value-cell rules above, but its rows
+           aren't clickable (each cell has its own inputs/buttons instead of opening a detail view),
+           so tbody's default cursor:pointer/hover-highlight from the List view would be misleading
+           here. */
+        .team-lots-wrap .team-lots-table tbody tr { cursor: default; }
+        .team-lots-wrap .team-lots-table tbody tr:hover { background: none; }
+        .team-lots-wrap .team-lots-table td, .team-lots-wrap .team-lots-table th { vertical-align: top; }
+        .team-lot-price-input {
+          width: 90px; font-family: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--paper-line);
+          border-radius: 3px; background: #fff; color: var(--ink);
+        }
+        .team-lot-blurb {
+          width: 100%; min-width: 280px; font-family: inherit; font-size: 12.5px; line-height: 1.4; padding: 6px 8px;
+          border: 1px solid var(--paper-line); border-radius: 3px; background: #F7F4EA; color: var(--ink); resize: vertical;
+        }
+
         .empty-state { padding: 56px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--paper-line); }
         .empty-state p { margin: 0 0 16px; font-size: 15px; }
 
@@ -4733,6 +4917,7 @@ export default function CardLedger() {
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
           <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Selling</button>
           <button className={activeTab === "bundling" ? "active" : ""} onClick={() => setActiveTab("bundling")}>Bundling</button>
+          <button className={activeTab === "teamlots" ? "active" : ""} onClick={() => setActiveTab("teamlots")}>Team Lots</button>
         </div>
 
         {loadError && <div className="banner">Couldn't load your saved collection. Starting from an empty ledger — anything you add now will still be saved going forward.</div>}
@@ -5025,7 +5210,9 @@ export default function CardLedger() {
             onToggleCantFind={toggleSellerCantFind}
           />
         ) : activeTab === "bundling" ? null // rendered always-mounted below, see round 46d comment
-        : !loaded ? (
+        : activeTab === "teamlots" ? (
+          <TeamLotsPanel cards={sellerEligibleCards} />
+        ) : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
