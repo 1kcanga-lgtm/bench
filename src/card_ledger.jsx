@@ -1738,7 +1738,8 @@ function AutoImportPanel({ onCardsMayHaveChanged, isActive }) {
 // CardLedger level) rather than the main collection -- they never touch its totals, checklists, or
 // counts, and "Clear bundle" below just empties this tab's pool once that pack is bagged and
 // listed, no different from throwing away a shipping label once it's used.
-function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard, onDiscardCard, onDiscardJob, isActive }) {
+function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveChanged, onUpdateCard, onDiscardCard, onDiscardJob, isActive }) {
+  const [bundlingView, setBundlingView] = useState("packs");
   const [folderInput, setFolderInput] = useState("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
@@ -2057,6 +2058,17 @@ function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard,
         </details>
       </div>
 
+      <div className="view-toggle" style={{ margin: "20px auto 0", maxWidth: 320 }}>
+        <button className={bundlingView === "packs" ? "active" : ""} onClick={() => setBundlingView("packs")}>Packs</button>
+        <button className={bundlingView === "teamlots" ? "active" : ""} onClick={() => setBundlingView("teamlots")}>Team Lots</button>
+      </div>
+
+      {bundlingView === "teamlots" ? (
+        <div style={{ marginTop: 24 }}>
+          <TeamLotsPanel cards={sellerEligibleCards} />
+        </div>
+      ) : (
+      <>
       {activeJobs.length > 0 && (
         <div style={{ marginTop: 24 }}>
           <h3>Identifying</h3>
@@ -2142,6 +2154,9 @@ function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard,
                 <p className="tile-sub" style={{ margin: "0 14px 10px" }}>
                   {breakdown.map(([t, n]) => `${t} (${n})`).join(", ")}
                 </p>
+                <p style={{ margin: "0 14px 14px", fontSize: 13.5, lineHeight: 1.5, opacity: 0.85 }}>
+                  {buildPackBlurb(pack.listing, suggested)}
+                </p>
                 {isExpanded && (
                   <div className="seller-photo-grid">
                     {pack.cards.map((c) => {
@@ -2183,6 +2198,8 @@ function BundlingPanel({ cards, getDisplay, onCardsMayHaveChanged, onUpdateCard,
             );
           })}
         </div>
+      )}
+      </>
       )}
     </div>
   );
@@ -2574,7 +2591,11 @@ function buildListingCopyText(listing, discountPct) {
   const lines = [
     suggestedListingTitle(listing),
     "",
-    `Suggested price: ${money(suggested)}  (book value ${money(listing.total)}, ${discountPct}% off)`,
+    // Round 48: a ready-to-paste eBay description paragraph (same style as the Team Lots blurb),
+    // not just a bare price line -- this is the part Kaleb actually drops into the listing body.
+    buildPackBlurb(listing, suggested),
+    "",
+    `(book value ${money(listing.total)}, ${discountPct}% off)`,
     listing.kind === "mixed"
       ? `${listing.cards.length} cards — ${listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}`
       : `${listing.cards.length} cards — ${listing.team}`,
@@ -2992,6 +3013,25 @@ function buildTeamLotBlurb(lot, finalPrice) {
   return (
     `This lot includes ${lot.count} card${lot.count === 1 ? "" : "s"} from the ${lot.team}. ` +
     `Individually, these cards are valued at approximately ${moneyWhole(lot.total)}${standoutsClause} ` +
+    `Listed here as a full lot for ${moneyWhole(finalPrice)}.`
+  );
+}
+
+// Round 48: same natural-language blurb treatment as buildTeamLotBlurb above, but for a single
+// Bundling pack (a ~30-card scanned batch) instead of a whole team's sale-eligible pool -- Kaleb
+// wants the Packs workflow to hand him eBay-ready listing copy as soon as a pack finishes
+// identifying, not just a title + raw per-card list.
+function buildPackBlurb(listing, finalPrice) {
+  const standouts = listing.cards
+    .filter((c) => Number(c.value) > 0)
+    .sort((a, b) => (b.value || 0) - (a.value || 0))
+    .slice(0, 3)
+    .map((c) => `${c.player} (~${moneyWhole(c.value)})`);
+  const standoutsClause = standouts.length ? ` — including standout${standouts.length === 1 ? "" : "s"} like ${joinWithAnd(standouts)}.` : ".";
+  const subject = listing.kind === "mixed" ? "a mix of NHL teams" : `the ${listing.team}`;
+  return (
+    `This lot includes ${listing.cards.length} card${listing.cards.length === 1 ? "" : "s"} from ${subject}. ` +
+    `Individually, these cards are valued at approximately ${moneyWhole(listing.total)}${standoutsClause} ` +
     `Listed here as a full lot for ${moneyWhole(finalPrice)}.`
   );
 }
@@ -4917,7 +4957,6 @@ export default function CardLedger() {
           <button className={activeTab === "autoimport" ? "active" : ""} onClick={() => setActiveTab("autoimport")}>Auto Import</button>
           <button className={activeTab === "sellers" ? "active" : ""} onClick={() => setActiveTab("sellers")}>Selling</button>
           <button className={activeTab === "bundling" ? "active" : ""} onClick={() => setActiveTab("bundling")}>Bundling</button>
-          <button className={activeTab === "teamlots" ? "active" : ""} onClick={() => setActiveTab("teamlots")}>Team Lots</button>
         </div>
 
         {loadError && <div className="banner">Couldn't load your saved collection. Starting from an empty ledger — anything you add now will still be saved going forward.</div>}
@@ -5210,9 +5249,7 @@ export default function CardLedger() {
             onToggleCantFind={toggleSellerCantFind}
           />
         ) : activeTab === "bundling" ? null // rendered always-mounted below, see round 46d comment
-        : activeTab === "teamlots" ? (
-          <TeamLotsPanel cards={sellerEligibleCards} />
-        ) : !loaded ? (
+        : !loaded ? (
           <div className="empty-state"><p>Loading your collection...</p></div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
@@ -5390,6 +5427,7 @@ export default function CardLedger() {
         <div style={{ display: activeTab === "bundling" ? "block" : "none" }}>
           <BundlingPanel
             cards={bundlingCards}
+            sellerEligibleCards={sellerEligibleCards}
             getDisplay={getDisplay}
             onCardsMayHaveChanged={reloadBundlingCardsFromStorage}
             onUpdateCard={updateBundlingCard}
