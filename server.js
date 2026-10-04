@@ -43,6 +43,20 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "card-ledger.db");
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ANTHROPIC_VERSION = "2023-06-01";
+
+// Round 50: eBay Sell API (Phase 2 of the team-lot listing helper) -- lets Bench create a DRAFT
+// eBay listing straight from a Bundling pack instead of just handing Kaleb copy-paste text. Same
+// "no key, clear error, nothing crashes" shape as the Anthropic key above. EBAY_ENV defaults to
+// "sandbox" on purpose -- this only ever talks to Production if that's deliberately flipped once
+// everything's been proven out safely.
+const EBAY_ENV = process.env.EBAY_ENV || "sandbox";
+const EBAY_APP_ID = process.env.EBAY_APP_ID || "";
+const EBAY_CERT_ID = process.env.EBAY_CERT_ID || "";
+const EBAY_RUNAME = process.env.EBAY_RUNAME || "";
+const EBAY_OAUTH_BASE = EBAY_ENV === "production" ? "https://auth.ebay.com" : "https://auth.sandbox.ebay.com";
+const EBAY_API_BASE = EBAY_ENV === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
+const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
+const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
 // Root folder Bulk Auto-Import is allowed to read from -- bind-mount your actual scan folder to
 // this path (see docker-compose.yml's IMPORT_DIR). Deliberately a single fixed root rather than
 // letting the browser pass an arbitrary filesystem path: the frontend only ever supplies a name
@@ -119,6 +133,100 @@ app.put("/api/storage/:key", (req, res) => {
   const value = req.body && typeof req.body.value === "string" ? req.body.value : "";
   setStmt.run(req.params.key, value);
   res.json({ ok: true });
+});
+
+// --- eBay OAuth (Sell API) ----------------------------------------------------------------
+// The refresh token (and a cached access token) ride in the same kv table as everything else --
+// no new storage mechanism, no new file to lose track of. One connected eBay account for the
+// whole app, same as there's one Anthropic key for the whole app; fine for a single-seller
+// self-hosted tool.
+function getEbayTokens() {
+  const row = getStmt.get("ebay-oauth-tokens");
+  return row ? JSON.parse(row.value) : null;
+}
+function setEbayTokens(tokens) {
+  setStmt.run("ebay-oauth-tokens", JSON.stringify(tokens));
+}
+
+// Returns a currently-valid access token, refreshing it first if it's missing or close to
+// expiring. Throws if eBay hasn't been connected yet (no refresh token on file) or if the
+// refresh itself fails (e.g. the Sandbox account's consent was revoked) -- callers turn that
+// into a normal JSON error response rather than letting it bubble up as a 500.
+async function getValidEbayAccessToken() {
+  const tokens = getEbayTokens();
+  if (!tokens || !tokens.refresh_token) {
+    throw new Error("eBay isn't connected yet. Go to Bundling and click \"Connect eBay account\" first.");
+  }
+  if (tokens.access_token && tokens.access_token_expires_at && Date.now() < tokens.access_token_expires_at - 60000) {
+    return tokens.access_token;
+  }
+  const basicAuth = Buffer.from(`${EBAY_APP_ID}:${EBAY_CERT_ID}`).toString("base64");
+  const resp = await fetch(`${EBAY_API_BASE}/identity/v1/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${basicAuth}` },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: tokens.refresh_token,
+      scope: EBAY_SCOPES.join(" "),
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data.error_description || data.error || "eBay rejected the refresh token -- try reconnecting your eBay account.");
+  }
+  const updated = { ...tokens, access_token: data.access_token, access_token_expires_at: Date.now() + data.expires_in * 1000 };
+  setEbayTokens(updated);
+  return updated.access_token;
+}
+
+app.get("/api/ebay/status", (req, res) => {
+  const tokens = getEbayTokens();
+  res.json({ configured: EBAY_CONFIGURED, connected: !!(tokens && tokens.refresh_token), env: EBAY_ENV });
+});
+
+app.get("/api/ebay/connect", (req, res) => {
+  if (!EBAY_CONFIGURED) {
+    return res
+      .status(400)
+      .send(
+        "eBay isn't configured on this server yet. Set EBAY_APP_ID, EBAY_CERT_ID, and EBAY_RUNAME in the stack's environment variables in Portainer and redeploy, then try again."
+      );
+  }
+  // eBay's OAuth quirk: the redirect_uri parameter here is the RuName itself (an opaque
+  // identifier eBay maps internally to the accept/decline URLs configured on the Application
+  // Keys page), not a literal URL -- see https://developer.ebay.com/api-docs/static/oauth-credentials.html
+  const authorizeUrl = new URL(`${EBAY_OAUTH_BASE}/oauth2/authorize`);
+  authorizeUrl.searchParams.set("client_id", EBAY_APP_ID);
+  authorizeUrl.searchParams.set("redirect_uri", EBAY_RUNAME);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("scope", EBAY_SCOPES.join(" "));
+  res.redirect(authorizeUrl.toString());
+});
+
+app.get("/api/ebay/callback", async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).send("eBay didn't send back an authorization code. Close this tab and try connecting again from Bench.");
+  }
+  try {
+    const basicAuth = Buffer.from(`${EBAY_APP_ID}:${EBAY_CERT_ID}`).toString("base64");
+    const resp = await fetch(`${EBAY_API_BASE}/identity/v1/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${basicAuth}` },
+      body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: EBAY_RUNAME }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error_description || data.error || "eBay rejected the authorization code.");
+    setEbayTokens({
+      refresh_token: data.refresh_token,
+      access_token: data.access_token,
+      access_token_expires_at: Date.now() + data.expires_in * 1000,
+    });
+    res.send("<h2>eBay account connected.</h2><p>You can close this tab and go back to Bench.</p>");
+  } catch (err) {
+    console.error("eBay OAuth callback failed:", err);
+    res.status(500).send(`Connecting to eBay failed: ${String((err && err.message) || err)}. Close this tab and try again from Bench.`);
+  }
 });
 
 // --- photo file storage ------------------------------------------------------------------
@@ -206,4 +314,5 @@ app.listen(PORT, () => {
   console.log(`Card Ledger listening on port ${PORT}`);
   console.log(`Database file: ${DB_PATH}`);
   console.log(ANTHROPIC_API_KEY ? "Anthropic API key: configured" : "Anthropic API key: NOT set (AI features disabled)");
+  console.log(EBAY_CONFIGURED ? `eBay API: configured (${EBAY_ENV})` : "eBay API: NOT configured (eBay listing features disabled)");
 });

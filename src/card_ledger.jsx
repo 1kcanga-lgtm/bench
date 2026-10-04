@@ -1754,8 +1754,21 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
   const [copiedKey, setCopiedKey] = useState(null);
   const [expandedPackKeys, setExpandedPackKeys] = useState(() => new Set());
   const [drafts, setDrafts] = useState({}); // bundling card id -> editable form fields, for a needsReview card
+  const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, env } from /api/ebay/status
 
   const safeDiscount = Math.min(90, Math.max(0, Number(discountPct) || 0));
+
+  // Round 50: just enough to know whether to show "Connect eBay account" or a "Connected"
+  // badge -- the actual OAuth handshake happens server-side (see server.js's /api/ebay/connect
+  // and /api/ebay/callback), this is only checking the result of it.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ebay/status")
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled) setEbayStatus(data); })
+      .catch(() => { if (!cancelled) setEbayStatus(null); });
+    return () => { cancelled = true; };
+  }, [isActive]);
 
   async function refresh() {
     try {
@@ -2058,7 +2071,19 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
         </details>
       </div>
 
-      <div className="view-toggle" style={{ margin: "20px auto 0", maxWidth: 320 }}>
+      <div style={{ textAlign: "center", marginTop: 14, fontSize: 13 }}>
+        {ebayStatus === null ? null : ebayStatus.connected ? (
+          <span style={{ opacity: 0.7 }}>eBay ({ebayStatus.env}): connected</span>
+        ) : ebayStatus.configured ? (
+          <a href="/api/ebay/connect" className="btn-secondary" style={{ display: "inline-block", textDecoration: "none" }}>
+            Connect eBay account ({ebayStatus.env})
+          </a>
+        ) : (
+          <span style={{ opacity: 0.6 }}>eBay isn't configured on this server yet</span>
+        )}
+      </div>
+
+      <div className="view-toggle" style={{ margin: "14px auto 0", maxWidth: 320 }}>
         <button className={bundlingView === "packs" ? "active" : ""} onClick={() => setBundlingView("packs")}>Packs</button>
         <button className={bundlingView === "teamlots" ? "active" : ""} onClick={() => setBundlingView("teamlots")}>Team Lots</button>
       </div>
