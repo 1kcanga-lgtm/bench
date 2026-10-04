@@ -2046,21 +2046,14 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
       });
   }
 
-  // Round 56/58: shows what createEbayDraft actually made on eBay -- the only way to see it at
+  // Round 56/58: fetches what createEbayDraft actually made on eBay -- the only way to see it at
   // all, since an unpublished Inventory API offer has no page anywhere on eBay's own site
   // (confirmed via eBay's docs -- not something broken in this app). Round 58: the server now
   // hands back title/photos/condition alongside the offer (eBay splits those across two separate
   // objects internally), so this renders a real summary instead of a raw JSON dump -- no need to
-  // jump to eBay's API Explorer for any of it.
-  function viewEbayOffer(key, offerId) {
-    if (draftStates[key] && draftStates[key].offerDetails) {
-      // already showing it -- toggle off rather than re-fetching
-      setDraftStates((prev) => {
-        const { offerDetails, offerDetailsError, ...rest } = prev[key] || {};
-        return { ...prev, [key]: rest };
-      });
-      return;
-    }
+  // jump to eBay's API Explorer for any of it. Split out from the toggle button below (round 59
+  // follow-up) so the "add photos" save flow can also force a fresh fetch afterward.
+  function fetchOfferDetails(key, offerId) {
     setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], loadingOffer: true, offerDetailsError: null } }));
     fetch(`/api/ebay/offer/${encodeURIComponent(offerId)}`)
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -2073,6 +2066,152 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
           ...prev,
           [key]: { ...prev[key], loadingOffer: false, offerDetailsError: String((e && e.message) || e) },
         }));
+      });
+  }
+
+  function viewEbayOffer(key, offerId) {
+    if (draftStates[key] && draftStates[key].offerDetails) {
+      // already showing it -- toggle off rather than re-fetching
+      setDraftStates((prev) => {
+        const { offerDetails, offerDetailsError, ...rest } = prev[key] || {};
+        return { ...prev, [key]: rest };
+      });
+      return;
+    }
+    fetchOfferDetails(key, offerId);
+  }
+
+  // Round 60: Kaleb's next ask -- he's going to take real photos of the physical lot instead of
+  // relying only on the auto-picked scan photos of the top 3 standout cards, and wants to add (and
+  // rotate) those photos right from the "View draft details" panel rather than editing anything
+  // through eBay's own side. Staged locally as plain data URLs (same `fileToResizedDataUrl` intake
+  // every other photo path in this app uses) until "Save to listing" actually uploads them -- lets
+  // Kaleb fix a sideways photo with the rotate button before it ever leaves his browser.
+  async function addStagedDraftPhotos(key, files) {
+    if (!files || !files.length) return;
+    let read;
+    try {
+      read = await Promise.all(files.map((f) => fileToResizedDataUrl(f, 1600, 0.88)));
+    } catch (e) {
+      setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], savePhotosError: "Couldn't read one of those photos -- try again." } }));
+      return;
+    }
+    const staged = read.map((dataUrl) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, dataUrl }));
+    setDraftStates((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], stagedPhotos: [...((prev[key] && prev[key].stagedPhotos) || []), ...staged] },
+    }));
+  }
+
+  // Rotates a photo that's still staged locally -- not yet uploaded, so no CORS issue the way an
+  // already-live eBay/CDN image would have (see the identical note on the gallery's own rotate
+  // button, round 33-era).
+  async function rotateStagedDraftPhoto(key, photoId) {
+    const current = draftStates[key] && draftStates[key].stagedPhotos;
+    const found = current && current.find((p) => p.id === photoId);
+    if (!found) return;
+    const rotated = await rotateDataUrl(found.dataUrl, 90);
+    setDraftStates((prev) => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        stagedPhotos: (prev[key].stagedPhotos || []).map((p) => (p.id === photoId ? { ...p, dataUrl: rotated } : p)),
+      },
+    }));
+  }
+
+  function removeStagedDraftPhoto(key, photoId) {
+    setDraftStates((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], stagedPhotos: (prev[key].stagedPhotos || []).filter((p) => p.id !== photoId) },
+    }));
+  }
+
+  // Lets Kaleb drop one of the listing's CURRENT photos (e.g. an auto-picked card scan he'd rather
+  // replace with a real photo) -- just marks it for removal locally; nothing changes on eBay until
+  // "Save to listing" below actually sends the trimmed list.
+  function toggleRemoveCurrentDraftImage(key, url) {
+    setDraftStates((prev) => {
+      const removed = new Set((prev[key] && prev[key].removedImageUrls) || []);
+      if (removed.has(url)) removed.delete(url);
+      else removed.add(url);
+      return { ...prev, [key]: { ...prev[key], removedImageUrls: Array.from(removed) } };
+    });
+  }
+
+  // Uploads every staged photo (saved as a real photo file, same /api/photos endpoint the rest of
+  // the app's photo intake uses), combines the result with whatever current images weren't marked
+  // for removal above, and re-sends the draft -- create-draft's own inventory-item PUT is a full
+  // replace, which is exactly what both "add" and "remove" need here.
+  function saveDraftPhotos(key, pack, sections, finalPrice) {
+    const state = draftStates[key] || {};
+    const staged = state.stagedPhotos || [];
+    const removed = new Set(state.removedImageUrls || []);
+    if (!staged.length && !removed.size) return;
+    setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], savingPhotos: true, savePhotosError: null } }));
+    Promise.all(
+      staged.map((p) =>
+        fetch("/api/photos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dataUrl: p.dataUrl }),
+        })
+          .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+          .then(({ ok, data }) => {
+            if (!ok || !data.url) throw new Error((data && data.error && data.error.message) || "Couldn't save a photo.");
+            return `${window.location.origin}${data.url}`;
+          })
+      )
+    )
+      .then((newUrls) => {
+        const existing = ((state.offerDetails && state.offerDetails.imageUrls) || []).filter((u) => !removed.has(u));
+        const combined = [...existing, ...newUrls].slice(0, 12);
+        return fetch("/api/ebay/create-draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sku: `bench-${pack.jobId}`,
+            title: sections.title,
+            description: sections.description,
+            price: finalPrice,
+            quantity: pack.listing.cards.length,
+            imageUrls: combined,
+          }),
+        })
+          .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+          .then(({ ok, data }) => {
+            if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "eBay rejected the updated photos.");
+          });
+      })
+      .then(() => {
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], savingPhotos: false, stagedPhotos: [], removedImageUrls: [] } }));
+        fetchOfferDetails(key, state.offerId);
+      })
+      .catch((e) => {
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], savingPhotos: false, savePhotosError: String((e && e.message) || e) } }));
+      });
+  }
+
+  // Round 59: Kaleb's explicit next ask after round 58's "View draft details" -- a button that
+  // actually publishes an existing draft, turning it into a real, live eBay listing with its own
+  // page (sandbox.ebay.com/itm/{id} or ebay.com/itm/{id} in production), instead of needing eBay's
+  // side to finish it -- which, per round 57's research, has no UI path for an Inventory API draft
+  // anyway. Two-step (click to arm, click again to confirm) rather than a native confirm() dialog,
+  // matching the rest of this file's toggle-based UI patterns -- this goes live for real, so it's
+  // deliberately not a single accidental click away.
+  function publishEbayOffer(key, offerId) {
+    setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], publishing: true, publishError: null, publishConfirming: false } }));
+    fetch(`/api/ebay/publish/${encodeURIComponent(offerId)}`, { method: "POST" })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "eBay rejected publishing this listing.");
+        setDraftStates((prev) => ({
+          ...prev,
+          [key]: { ...prev[key], publishing: false, published: { listingId: data.listingId, viewUrl: data.viewUrl } },
+        }));
+      })
+      .catch((e) => {
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], publishing: false, publishError: String((e && e.message) || e) } }));
       });
   }
 
@@ -2301,11 +2440,24 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                 )}
                 {draftStates[key]?.status === "done" && (
                   <div style={{ margin: "0 14px 10px" }}>
-                    <p style={{ fontSize: 12.5, opacity: 0.75, margin: "0 0 4px" }}>
-                      Saved as a draft on eBay (offer {draftStates[key].offerId}) -- this kind of draft has no page on
-                      eBay's own site until it's published, so use the button below to check it rather than looking in
-                      Seller Hub.
-                    </p>
+                    {draftStates[key].published ? (
+                      <p style={{ fontSize: 12.5, margin: "0 0 4px" }}>
+                        Published to eBay (listing {draftStates[key].published.listingId}) --{" "}
+                        {draftStates[key].published.viewUrl ? (
+                          <a href={draftStates[key].published.viewUrl} target="_blank" rel="noopener noreferrer">
+                            view the live listing
+                          </a>
+                        ) : (
+                          "it's live."
+                        )}
+                      </p>
+                    ) : (
+                      <p style={{ fontSize: 12.5, opacity: 0.75, margin: "0 0 4px" }}>
+                        Saved as a draft on eBay (offer {draftStates[key].offerId}) -- this kind of draft has no page on
+                        eBay's own site until it's published, so use the button below to check it rather than looking in
+                        Seller Hub.
+                      </p>
+                    )}
                     <button
                       type="button"
                       className="link-btn"
@@ -2318,8 +2470,45 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                           ? "Hide draft details"
                           : "View draft details"}
                     </button>
+                    {!draftStates[key].published && ebayStatus && ebayStatus.publishReady && (
+                      draftStates[key].publishConfirming ? (
+                        <span style={{ marginLeft: 10, fontSize: 12.5 }}>
+                          This makes it a real, live eBay listing --{" "}
+                          <button type="button" className="link-btn" onClick={() => publishEbayOffer(key, draftStates[key].offerId)}>
+                            confirm publish
+                          </button>{" "}
+                          <button
+                            type="button"
+                            className="link-btn"
+                            onClick={() =>
+                              setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], publishConfirming: false } }))
+                            }
+                          >
+                            cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="link-btn"
+                          style={{ marginLeft: 10 }}
+                          disabled={draftStates[key].publishing}
+                          onClick={() => setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], publishConfirming: true } }))}
+                        >
+                          {draftStates[key].publishing ? "Publishing…" : "Publish to eBay"}
+                        </button>
+                      )
+                    )}
+                    {!draftStates[key].published && ebayStatus && !ebayStatus.publishReady && (
+                      <span style={{ marginLeft: 10, fontSize: 11.5, opacity: 0.6 }}>
+                        add {(ebayStatus.missingPublishConfig || []).join(", ")} in Portainer to enable publishing from here
+                      </span>
+                    )}
                     {draftStates[key].offerDetailsError && (
                       <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].offerDetailsError}</p>
+                    )}
+                    {draftStates[key].publishError && (
+                      <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].publishError}</p>
                     )}
                     {draftStates[key].offerDetails && (
                       <div style={{ marginTop: 6, background: "var(--panel, #f4f1e8)", borderRadius: 6, padding: 10 }}>
@@ -2327,12 +2516,29 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                           {draftStates[key].offerDetails.title || "(no title saved on the listing)"}
                         </p>
                         {draftStates[key].offerDetails.imageUrls && draftStates[key].offerDetails.imageUrls.length > 0 && (
-                          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                            {draftStates[key].offerDetails.imageUrls.slice(0, 3).map((url, i) => (
-                              <div key={i} className="photo-thumb" style={{ width: 70, height: 97 }}>
-                                <CardImage src={url} fallbackLabel="No image" />
-                              </div>
-                            ))}
+                          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+                            {draftStates[key].offerDetails.imageUrls.map((url, i) => {
+                              const removing = (draftStates[key].removedImageUrls || []).includes(url);
+                              return (
+                                <div key={i} style={{ position: "relative", opacity: removing ? 0.35 : 1 }}>
+                                  <div className="photo-thumb" style={{ width: 70, height: 97 }}>
+                                    <CardImage src={url} fallbackLabel="No image" />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    title={removing ? "Keep this photo" : "Remove this photo"}
+                                    onClick={() => toggleRemoveCurrentDraftImage(key, url)}
+                                    style={{
+                                      position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%",
+                                      border: "none", background: removing ? "#777" : "#b23", color: "#fff", fontSize: 12,
+                                      lineHeight: "20px", cursor: "pointer", padding: 0,
+                                    }}
+                                  >
+                                    {removing ? "↺" : "×"}
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                         <p style={{ margin: "0 0 8px", fontSize: 12.5, opacity: 0.8 }}>
@@ -2345,10 +2551,81 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                           {draftStates[key].offerDetails.status && ` · ${draftStates[key].offerDetails.status}`}
                         </p>
                         {draftStates[key].offerDetails.listingDescription && (
-                          <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                          <p style={{ margin: "0 0 10px", fontSize: 12.5, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                             {draftStates[key].offerDetails.listingDescription}
                           </p>
                         )}
+
+                        <div style={{ borderTop: "1px solid rgba(0,0,0,0.1)", paddingTop: 8 }}>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            id={`draft-photo-input-${key}`}
+                            style={{ display: "none" }}
+                            onChange={(e) => {
+                              const files = Array.from(e.target.files || []);
+                              e.target.value = "";
+                              if (files.length) addStagedDraftPhotos(key, files);
+                            }}
+                          />
+                          <label htmlFor={`draft-photo-input-${key}`} className="link-btn" style={{ cursor: "pointer" }}>
+                            + Add real photos
+                          </label>
+
+                          {draftStates[key].stagedPhotos && draftStates[key].stagedPhotos.length > 0 && (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                              {draftStates[key].stagedPhotos.map((p) => (
+                                <div key={p.id} style={{ position: "relative" }}>
+                                  <div className="photo-thumb" style={{ width: 70, height: 97 }}>
+                                    <CardImage src={p.dataUrl} fallbackLabel="No image" />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    title="Rotate 90°"
+                                    onClick={() => rotateStagedDraftPhoto(key, p.id)}
+                                    style={{
+                                      position: "absolute", bottom: -6, left: -6, width: 22, height: 22, borderRadius: "50%",
+                                      border: "none", background: "#444", color: "#fff", fontSize: 12, lineHeight: "22px",
+                                      cursor: "pointer", padding: 0,
+                                    }}
+                                  >
+                                    ⟳
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title="Remove"
+                                    onClick={() => removeStagedDraftPhoto(key, p.id)}
+                                    style={{
+                                      position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%",
+                                      border: "none", background: "#b23", color: "#fff", fontSize: 12, lineHeight: "20px",
+                                      cursor: "pointer", padding: 0,
+                                    }}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {((draftStates[key].stagedPhotos && draftStates[key].stagedPhotos.length > 0) ||
+                            (draftStates[key].removedImageUrls && draftStates[key].removedImageUrls.length > 0)) && (
+                            <div style={{ marginTop: 8 }}>
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={draftStates[key].savingPhotos}
+                                onClick={() => saveDraftPhotos(key, pack, sections, suggested)}
+                              >
+                                {draftStates[key].savingPhotos ? "Saving to listing…" : "Save photo changes to listing"}
+                              </button>
+                            </div>
+                          )}
+                          {draftStates[key].savePhotosError && (
+                            <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].savePhotosError}</p>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
