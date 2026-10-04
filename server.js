@@ -77,6 +77,23 @@ const EBAY_FULFILLMENT_POLICY_ID = process.env.EBAY_FULFILLMENT_POLICY_ID || "";
 const EBAY_PAYMENT_POLICY_ID = process.env.EBAY_PAYMENT_POLICY_ID || "";
 const EBAY_RETURN_POLICY_ID = process.env.EBAY_RETURN_POLICY_ID || "";
 const EBAY_DRAFT_CONFIGURED = !!(EBAY_FULFILLMENT_POLICY_ID && EBAY_PAYMENT_POLICY_ID && EBAY_RETURN_POLICY_ID);
+
+// Round 59: config for actually PUBLISHING a draft -- turning it into a real, live eBay listing,
+// not just a draft sitting in Bench. publishOffer requires the offer to have a merchantLocationKey
+// pointing at an existing Inventory Location (confirmed via eBay's own docs), which createOffer
+// (round 55) deliberately never set, on purpose, to keep draft creation a true draft with no
+// publish side effects. Creating that location needs only a country + postal code -- same
+// shipping-origin info any real eBay listing already discloses to buyers, no street address
+// required. EBAY_MERCHANT_LOCATION_KEY isn't something Kaleb needs to set -- it's just an internal
+// id for the one location this app uses, fixed here rather than left as an env var.
+const EBAY_MERCHANT_LOCATION_KEY = "bench-main";
+const EBAY_LOCATION_COUNTRY = process.env.EBAY_LOCATION_COUNTRY || "US";
+const EBAY_LOCATION_POSTAL_CODE = process.env.EBAY_LOCATION_POSTAL_CODE || "";
+const EBAY_PUBLISH_CONFIGURED = !!EBAY_LOCATION_POSTAL_CODE;
+// Sandbox and production listings live at different hosts once published -- confirmed via eBay's
+// developer community (the sandbox item page is sandbox.ebay.com/itm/{listingId}, not under the
+// api.sandbox.ebay.com API host used for calls above).
+const EBAY_VIEW_BASE = EBAY_ENV === "production" ? "https://www.ebay.com/itm" : "https://sandbox.ebay.com/itm";
 // Root folder Bulk Auto-Import is allowed to read from -- bind-mount your actual scan folder to
 // this path (see docker-compose.yml's IMPORT_DIR). Deliberately a single fixed root rather than
 // letting the browser pass an arbitrary filesystem path: the frontend only ever supplies a name
@@ -244,6 +261,10 @@ app.get("/api/ebay/status", (req, res) => {
           !EBAY_PAYMENT_POLICY_ID && "EBAY_PAYMENT_POLICY_ID",
           !EBAY_RETURN_POLICY_ID && "EBAY_RETURN_POLICY_ID",
         ].filter(Boolean),
+    // Round 59: same "tell the frontend exactly what's missing" shape as draftReady above, for
+    // actually publishing a draft rather than just creating it.
+    publishReady: EBAY_PUBLISH_CONFIGURED,
+    missingPublishConfig: EBAY_PUBLISH_CONFIGURED ? [] : ["EBAY_LOCATION_POSTAL_CODE"],
   });
 });
 
@@ -323,6 +344,64 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
+    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+  }
+});
+
+// Round 59: creates (once) the single Inventory Location this app needs before a draft can be
+// published -- confirmed via eBay's own docs that publishOffer fails without one. Done lazily here,
+// the first time Kaleb actually publishes something, rather than making him do yet another one-off
+// API Explorer setup step the way the business policies needed (round 55/56) -- there's no UI path
+// for this either, but unlike business policies, this app can just create it for him in code.
+// Idempotent: a 404 on the GET means it doesn't exist yet and gets created; anything else (it
+// already exists) means there's nothing to do.
+async function ensureMerchantLocation() {
+  try {
+    await ebayApiRequest("GET", `/sell/inventory/v1/location/${encodeURIComponent(EBAY_MERCHANT_LOCATION_KEY)}`);
+    return;
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
+  await ebayApiRequest("POST", `/sell/inventory/v1/location/${encodeURIComponent(EBAY_MERCHANT_LOCATION_KEY)}`, {
+    location: { address: { country: EBAY_LOCATION_COUNTRY, postalCode: EBAY_LOCATION_POSTAL_CODE } },
+    locationTypes: ["WAREHOUSE"],
+    name: "Bench",
+  });
+}
+
+// Round 59: Kaleb's explicit next ask after round 58's "View draft details" -- a button that takes
+// an already-created draft and actually publishes it, making it a real, live eBay listing with its
+// own page, instead of requiring him to go finish it from eBay's side (which, per round 57's
+// research, has no UI path for an Inventory API draft anyway). Deliberately a separate, explicit
+// step from create-draft: nothing in this app ever publishes automatically.
+app.post("/api/ebay/publish/:offerId", async (req, res) => {
+  if (!EBAY_PUBLISH_CONFIGURED) {
+    return res.status(400).json({
+      error: {
+        message:
+          "eBay isn't set up to publish listings yet -- add EBAY_LOCATION_POSTAL_CODE (the ZIP code you ship from) to the stack's environment variables in Portainer and redeploy.",
+      },
+    });
+  }
+  const { offerId } = req.params;
+  try {
+    await ensureMerchantLocation();
+    const offer = await ebayApiRequest("GET", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);
+    if (offer.merchantLocationKey !== EBAY_MERCHANT_LOCATION_KEY) {
+      // updateOffer replaces the whole offer -- send everything back as-is, minus the read-only/
+      // immutable fields (offerId is a path param, sku/marketplaceId/format can't be changed on an
+      // existing offer, status/listing/tasks are response-only), plus the location it was missing.
+      const { offerId: _id, sku: _sku, marketplaceId: _mkt, format: _fmt, status: _status, listing: _listing, tasks: _tasks, ...updateBody } = offer;
+      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, {
+        ...updateBody,
+        merchantLocationKey: EBAY_MERCHANT_LOCATION_KEY,
+      });
+    }
+    const result = await ebayApiRequest("POST", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, {});
+    const listingId = result.listingId || null;
+    res.json({ ok: true, listingId, viewUrl: listingId ? `${EBAY_VIEW_BASE}/${encodeURIComponent(listingId)}` : null });
+  } catch (err) {
+    console.error("eBay publish failed:", err);
     res.status(502).json({ error: { message: String((err && err.message) || err) } });
   }
 });
