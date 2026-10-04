@@ -1753,6 +1753,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
   const [discountPct, setDiscountPct] = useState(50);
   const [copiedKey, setCopiedKey] = useState(null);
   const [expandedPackKeys, setExpandedPackKeys] = useState(() => new Set());
+  const [expandedListingKeys, setExpandedListingKeys] = useState(() => new Set());
   const [drafts, setDrafts] = useState({}); // bundling card id -> editable form fields, for a needsReview card
   const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, env } from /api/ebay/status
 
@@ -1918,6 +1919,15 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
     });
   }
 
+  function toggleListingExpanded(key) {
+    setExpandedListingKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
   function defaultDraft(card) {
     return {
       player: card.player || "",
@@ -1966,14 +1976,19 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
     });
   }
 
-  function copyPack(listing, key) {
+  // Round 51: Kaleb wants to fill in eBay's listing form field by field (title box, item
+  // specifics, description box, price box are all separate fields on eBay's own page), not paste
+  // one giant blob and manually pick it apart afterward -- see copySection below and the
+  // per-section layout in the pack card render.
+  function copySection(text, key) {
     try {
-      navigator.clipboard.writeText(buildListingCopyText(listing, safeDiscount));
+      navigator.clipboard.writeText(text);
       setCopiedKey(key);
       setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
     } catch (e) {
-      // clipboard access can be blocked in some contexts -- the listing text is still fully
-      // visible on screen either way, so this is a convenience, not something the feature depends on.
+      // clipboard access can be blocked in some contexts -- the text is still fully visible and
+      // selectable on screen either way, so this is a convenience, not something the feature
+      // depends on.
     }
   }
 
@@ -2148,8 +2163,10 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
           {packs.map((pack) => {
             const key = `bundling-${pack.jobId}`;
             const isExpanded = expandedPackKeys.has(key);
+            const listingExpanded = expandedListingKeys.has(key);
             const suggested = pack.listing.total * (1 - safeDiscount / 100);
             const breakdown = listingTeamBreakdown(pack.listing);
+            const sections = buildListingSections(pack.listing, safeDiscount);
             return (
               <div className="seller-bundle-card" key={key}>
                 <button
@@ -2170,8 +2187,8 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                     <div className="tile-sub">book {money(pack.listing.total)}</div>
                   </div>
                   <div className="seller-bundle-actions">
-                    <button type="button" className="link-btn" onClick={() => copyPack(pack.listing, key)}>
-                      {copiedKey === key ? "Copied!" : "Copy listing"}
+                    <button type="button" className="link-btn" onClick={() => toggleListingExpanded(key)}>
+                      {listingExpanded ? "Hide listing text" : "Listing text for eBay"}
                     </button>
                     <button type="button" className="btn-secondary" onClick={() => onDiscardJob(pack.jobId)}>Clear bundle</button>
                   </div>
@@ -2182,6 +2199,36 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                 <p style={{ margin: "0 14px 14px", fontSize: 13.5, lineHeight: 1.5, opacity: 0.85 }}>
                   {buildPackBlurb(pack.listing, suggested)}
                 </p>
+                {listingExpanded && (
+                  <div className="listing-sections" style={{ margin: "0 14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+                    {[
+                      { label: "Title (80 character max)", text: sections.title, rows: 2, sectionKey: "title" },
+                      { label: "Photos", text: sections.photos, rows: 4, sectionKey: "photos" },
+                      { label: "Item specifics", text: sections.itemSpecifics, rows: 5, sectionKey: "specifics" },
+                      { label: "Description", text: sections.description, rows: 10, sectionKey: "description" },
+                      { label: "Pricing settings", text: sections.pricingSettings, rows: 2, sectionKey: "pricing" },
+                    ].map((section) => {
+                      const sectionKey = `${key}-${section.sectionKey}`;
+                      return (
+                        <div key={section.sectionKey}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, opacity: 0.75 }}>{section.label}</label>
+                            <button type="button" className="btn-secondary" onClick={() => copySection(section.text, sectionKey)}>
+                              {copiedKey === sectionKey ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                          <textarea
+                            className="team-lot-blurb"
+                            readOnly
+                            value={section.text}
+                            rows={section.rows}
+                            onClick={(e) => e.target.select()}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {isExpanded && (
                   <div className="seller-photo-grid">
                     {pack.cards.map((c) => {
@@ -2636,7 +2683,12 @@ function ebayListingTitle(listing, finalPrice) {
   return fit || attempts[attempts.length - 1].slice(0, 77) + "...";
 }
 
-function buildListingCopyText(listing, discountPct) {
+// Round 51: broken into separate named pieces instead of one combined string, because eBay's own
+// listing form is separate fields -- a title box, an item-specifics block, a description box, a
+// price box -- not one place to paste everything at once. buildListingCopyText below still glues
+// these back into one string for SellerPanel's simpler single-button "Copy listing"; BundlingPanel
+// uses the pieces directly so Kaleb can grab (and see) each one on its own.
+function buildListingSections(listing, discountPct) {
   const suggested = listing.total * (1 - discountPct / 100);
   const subject = listing.kind === "mixed" ? "Mixed Teams" : listing.team;
   const standouts = listing.cards
@@ -2645,24 +2697,24 @@ function buildListingCopyText(listing, discountPct) {
     .slice(0, 3);
   const remainingCount = listing.cards.length - standouts.length;
 
-  const lines = [
-    "TITLE (80 character max)",
-    ebayListingTitle(listing, suggested),
-    "",
-    "PHOTOS",
+  const title = ebayListingTitle(listing, suggested);
+
+  const photos = [
     "1. Main photo: the whole stack fanned out on a plain background, with the team's best card on top",
     "2. Close-ups of the 2 or 3 top cards, front and back",
     "3. A photo of the packaged lot in its team bag, so buyers know what arrives",
     "4. Optional: a screenshot of your Bench value breakdown for that team",
-    "",
-    "ITEM SPECIFICS",
+  ].join("\n");
+
+  const itemSpecifics = [
     "Sport: Ice Hockey",
     `Team: ${subject}`,
     "Type: Lot",
     `Quantity: ${listing.cards.length}`,
     "Condition: Ungraded (raw, played/pulled from a personal collection)",
-    "",
-    "DESCRIPTION",
+  ].join("\n");
+
+  const description = [
     `${subject} Lot: ${listing.cards.length} Cards`,
     "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
     "",
@@ -2677,12 +2729,25 @@ function buildListingCopyText(listing, discountPct) {
     "Condition and shipping",
     "Raw cards, stored in sleeves/team bags, no grading. Ships in a padded mailer between cardboard stiffeners via USPS with tracking. Combined shipping if you buy more than one team lot.",
     "Valuations are estimates based on recent sold comps, not guarantees. Message me with any questions.",
-    "",
-    "PRICING SETTINGS",
+  ].join("\n");
+
+  const pricingSettings = [
     `Buy It Now at ${moneyWhole(suggested)}, Best Offer enabled`,
     "Shipping: calculated or flat, with a per-additional-lot discount",
-  ];
-  return lines.join("\n");
+  ].join("\n");
+
+  return { title, photos, itemSpecifics, description, pricingSettings };
+}
+
+function buildListingCopyText(listing, discountPct) {
+  const s = buildListingSections(listing, discountPct);
+  return [
+    "TITLE (80 character max)", s.title, "",
+    "PHOTOS", s.photos, "",
+    "ITEM SPECIFICS", s.itemSpecifics, "",
+    "DESCRIPTION", s.description, "",
+    "PRICING SETTINGS", s.pricingSettings,
+  ].join("\n");
 }
 
 function SellerPanel({ cards, bundles, foundIds, cantFindIds, getDisplay, onOpenDetail, onCreateBundle, onDissolveBundle, onMarkBundleSold, onReturnBundleToGallery, onToggleSold, onToggleFound, onToggleCantFind }) {
