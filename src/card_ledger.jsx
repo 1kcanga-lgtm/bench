@@ -506,6 +506,20 @@ function seasonStartYear(y) {
   return null;
 }
 
+// Round 54: a canonical "YYYY-YY" season label (e.g. "1993-94", "1999-00") for any year value a
+// card might carry -- whatever the AI identification happened to write into card.year (a bare
+// "1993", an already-season "93-94", "1993-94", etc.), this normalizes it to the same two-year
+// season format used everywhere else in the app (CHECKLIST_SETS, the Stars Checklist tab), so
+// eBay listing text doesn't show single-year dates in some spots and seasons in others. Falls
+// back to whatever text was there if it truly can't be parsed, and to "" if there's nothing to
+// show at all (matches the old behavior of just omitting an empty year from a line).
+function seasonYearLabel(y) {
+  if (!y && y !== 0) return "";
+  const start = seasonStartYear(y);
+  if (start == null) return String(y).trim();
+  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+}
+
 function normNum(n) {
   return String(n || "").trim().toLowerCase().replace(/^0+(?=\d)/, "");
 }
@@ -2676,7 +2690,7 @@ function suggestedListingTitle(listing) {
     .filter((n) => !isNaN(n));
   const yearLabel = years.length
     ? Math.min(...years) === Math.max(...years)
-      ? String(Math.min(...years))
+      ? seasonYearLabel(Math.min(...years))
       : `${Math.min(...years)}-${Math.max(...years)}`
     : "Mixed Years";
   const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
@@ -2706,7 +2720,7 @@ function ebayListingTitle(listing, finalPrice) {
     .filter((n) => !isNaN(n));
   const yearLabel = years.length
     ? Math.min(...years) === Math.max(...years)
-      ? String(Math.min(...years))
+      ? seasonYearLabel(Math.min(...years))
       : `${Math.min(...years)}-${Math.max(...years)}`
     : "Mixed Years";
   const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
@@ -2735,6 +2749,11 @@ function buildListingSections(listing, discountPct) {
     .filter((c) => Number(c.value) > 0)
     .sort((a, b) => (b.value || 0) - (a.value || 0))
     .slice(0, 3);
+  // Round 54: the full card list (added round 53) is now sorted highest-value-first, with the
+  // same top-3 standouts that get their own photos (see topCards below) marked with a star so
+  // a buyer can match the "pictured" claim back to specific lines in a plain-text description.
+  const standoutIds = new Set(standouts.map((c) => c.id));
+  const sortedCards = [...listing.cards].sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0));
 
   const title = ebayListingTitle(listing, suggested);
 
@@ -2761,21 +2780,23 @@ function buildListingSections(listing, discountPct) {
     `${subject} Lot: ${listing.cards.length} Cards`,
     "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
     "",
-    "What's in the lot",
-    ...listing.cards.map((c) => `${c.player}, ${[c.year, c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}`),
+    "What's in the lot (highest value first; ★ = pictured above)",
+    ...sortedCards.map((c) => {
+      const line = `${c.player}, ${[seasonYearLabel(c.year), c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}`;
+      return standoutIds.has(c.id) ? `★ ${line}` : line;
+    }),
     "",
     "The math",
     `Estimated value if sold individually: ~${moneyWhole(listing.total)}`,
-    `Lot price: ${moneyWhole(suggested)} (about ${discountPct}% off)`,
     "",
     "Condition and shipping",
-    "Raw cards, stored in sleeves/team bags, no grading. Ships in a padded mailer between cardboard stiffeners via USPS with tracking. Combined shipping if you buy more than one team lot.",
+    "Raw cards, stored in sleeves/team bags, no grading. Ships in a padded mailer between cardboard stiffeners via USPS with tracking.",
     "Valuations are estimates based on recent sold comps, not guarantees. Message me with any questions.",
   ].join("\n");
 
   const pricingSettings = [
     `Buy It Now at ${moneyWhole(suggested)}, Best Offer enabled`,
-    "Shipping: calculated or flat, with a per-additional-lot discount",
+    "Shipping: Free (USPS, with tracking)",
   ].join("\n");
 
   // The actual cards BundlingPanel's "Photos" section shows -- the lot's top standouts (same
