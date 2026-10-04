@@ -57,6 +57,26 @@ const EBAY_OAUTH_BASE = EBAY_ENV === "production" ? "https://auth.ebay.com" : "h
 const EBAY_API_BASE = EBAY_ENV === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
 const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
 const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
+
+// Round 55: config for the actual "create eBay draft" call (createOrReplaceInventoryItem +
+// createOffer -- NEVER publishOffer, same draft-only requirement as always). Business policies
+// have no Sandbox UI -- Kaleb has to create them via eBay's API Explorer (createFulfillmentPolicy
+// /createPaymentPolicy/createReturnPolicy) and copy the resulting policy IDs in here. Deliberately
+// NOT folded into EBAY_CONFIGURED above: a seller can finish connecting their eBay account (OAuth)
+// before they've set up policies, and /api/ebay/status (below) tells the frontend the two readiness
+// states separately so the UI can say exactly what's still missing.
+const EBAY_MARKETPLACE_ID = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+// Sports Mem, Cards & Fan Shop > Sports Trading Cards > Ice Hockey -- confirmed by its browse-node
+// URL pattern on ebay.com; override via env if that ever turns out wrong for this account/marketplace.
+const EBAY_CATEGORY_ID = process.env.EBAY_CATEGORY_ID || "261328";
+// Inventory API's condition enum has no single obvious value for "raw, ungraded trading card" --
+// USED_GOOD is the closest generic fit. Override via env if Kaleb's first real draft comes back
+// with a condition error; this isn't something verifiable from this sandboxed dev environment.
+const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_GOOD";
+const EBAY_FULFILLMENT_POLICY_ID = process.env.EBAY_FULFILLMENT_POLICY_ID || "";
+const EBAY_PAYMENT_POLICY_ID = process.env.EBAY_PAYMENT_POLICY_ID || "";
+const EBAY_RETURN_POLICY_ID = process.env.EBAY_RETURN_POLICY_ID || "";
+const EBAY_DRAFT_CONFIGURED = !!(EBAY_FULFILLMENT_POLICY_ID && EBAY_PAYMENT_POLICY_ID && EBAY_RETURN_POLICY_ID);
 // Root folder Bulk Auto-Import is allowed to read from -- bind-mount your actual scan folder to
 // this path (see docker-compose.yml's IMPORT_DIR). Deliberately a single fixed root rather than
 // letting the browser pass an arbitrary filesystem path: the frontend only ever supplies a name
@@ -179,9 +199,106 @@ async function getValidEbayAccessToken() {
   return updated.access_token;
 }
 
+// Thin wrapper around a Sell API call -- gets a valid token, sends the request, and throws a
+// readable Error (eBay's own error message when it sent one) rather than a raw non-2xx response.
+// Shared by the inventory-item and offer calls below; both are plain REST calls with no retry
+// logic of their own since a failed draft is just something Kaleb clicks the button to retry.
+async function ebayApiRequest(method, apiPath, body) {
+  const accessToken = await getValidEbayAccessToken();
+  const resp = await fetch(`${EBAY_API_BASE}${apiPath}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Language": "en-US",
+      "Accept-Language": "en-US",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await resp.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!resp.ok) {
+    const detail = (data.errors && data.errors[0] && data.errors[0].message) || data.error_description || data.error || JSON.stringify(data);
+    throw new Error(`eBay rejected the request (${resp.status}): ${detail}`);
+  }
+  return data;
+}
+
 app.get("/api/ebay/status", (req, res) => {
   const tokens = getEbayTokens();
-  res.json({ configured: EBAY_CONFIGURED, connected: !!(tokens && tokens.refresh_token), env: EBAY_ENV });
+  res.json({
+    configured: EBAY_CONFIGURED,
+    connected: !!(tokens && tokens.refresh_token),
+    env: EBAY_ENV,
+    // Separate from "connected" -- OAuth can succeed before business policies exist. Tells the
+    // frontend exactly which env vars are still missing so it can say so instead of just hiding
+    // the "Create eBay Draft" button with no explanation.
+    draftReady: EBAY_DRAFT_CONFIGURED,
+    missingDraftConfig: EBAY_DRAFT_CONFIGURED
+      ? []
+      : [
+          !EBAY_FULFILLMENT_POLICY_ID && "EBAY_FULFILLMENT_POLICY_ID",
+          !EBAY_PAYMENT_POLICY_ID && "EBAY_PAYMENT_POLICY_ID",
+          !EBAY_RETURN_POLICY_ID && "EBAY_RETURN_POLICY_ID",
+        ].filter(Boolean),
+  });
+});
+
+// Creates a DRAFT eBay listing from a Bundling pack -- an inventory item plus an unpublished
+// offer. Deliberately never calls publishOffer: Kaleb finishes it (adds any photos that didn't
+// carry over, double-checks pricing, hits "List it") himself from eBay's own Seller Hub > Drafts,
+// same "draft only, never auto-publish" requirement from when this feature was first scoped.
+app.post("/api/ebay/create-draft", async (req, res) => {
+  if (!EBAY_DRAFT_CONFIGURED) {
+    return res.status(400).json({
+      error: {
+        message:
+          "eBay business policies aren't set up on this server yet. Add EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, and EBAY_RETURN_POLICY_ID to the stack's environment variables in Portainer and redeploy.",
+      },
+    });
+  }
+  const { sku, title, description, price, quantity, imageUrls } = req.body || {};
+  if (!sku || !title || !description || !price || !quantity) {
+    return res.status(400).json({ error: { message: "Missing sku, title, description, price, or quantity." } });
+  }
+  try {
+    // Step 1: inventory item (the card/lot itself -- title, description, photos, how many).
+    // No merchantLocationKey here on purpose: it's only required at publish time, not at
+    // creation, which is what lets this stay a true draft without Kaleb first having to set up
+    // an Inventory Location (a whole separate API-only Sandbox step with no UI of its own).
+    await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, {
+      condition: EBAY_CONDITION,
+      product: {
+        title: String(title).slice(0, 80),
+        description,
+        ...(Array.isArray(imageUrls) && imageUrls.length ? { imageUrls: imageUrls.slice(0, 12) } : {}),
+      },
+      availability: { shipToLocationAvailability: { quantity } },
+    });
+
+    // Step 2: the offer (price, category, business policies) that actually turns the inventory
+    // item into something eBay will treat as a listing once published. Saved as-is; nothing
+    // after this call ever touches publishOffer.
+    const offer = await ebayApiRequest("POST", "/sell/inventory/v1/offer", {
+      sku,
+      marketplaceId: EBAY_MARKETPLACE_ID,
+      format: "FIXED_PRICE",
+      categoryId: EBAY_CATEGORY_ID,
+      listingDescription: description,
+      availableQuantity: quantity,
+      listingDuration: "GTC",
+      pricingSummary: { price: { value: String(Math.round(Number(price))), currency: "USD" } },
+      listingPolicies: {
+        fulfillmentPolicyId: EBAY_FULFILLMENT_POLICY_ID,
+        paymentPolicyId: EBAY_PAYMENT_POLICY_ID,
+        returnPolicyId: EBAY_RETURN_POLICY_ID,
+      },
+    });
+    res.json({ ok: true, sku, offerId: offer.offerId });
+  } catch (err) {
+    console.error("eBay create-draft failed:", err);
+    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+  }
 });
 
 app.get("/api/ebay/connect", (req, res) => {
@@ -315,4 +432,5 @@ app.listen(PORT, () => {
   console.log(`Database file: ${DB_PATH}`);
   console.log(ANTHROPIC_API_KEY ? "Anthropic API key: configured" : "Anthropic API key: NOT set (AI features disabled)");
   console.log(EBAY_CONFIGURED ? `eBay API: configured (${EBAY_ENV})` : "eBay API: NOT configured (eBay listing features disabled)");
+  console.log(EBAY_DRAFT_CONFIGURED ? "eBay draft listings: configured" : "eBay draft listings: NOT configured (business policy IDs missing)");
 });

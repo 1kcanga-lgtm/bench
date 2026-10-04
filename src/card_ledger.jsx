@@ -1769,7 +1769,12 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
   const [expandedPackKeys, setExpandedPackKeys] = useState(() => new Set());
   const [expandedListingKeys, setExpandedListingKeys] = useState(() => new Set());
   const [drafts, setDrafts] = useState({}); // bundling card id -> editable form fields, for a needsReview card
-  const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, env } from /api/ebay/status
+  const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, draftReady, env } from /api/ebay/status
+  // Round 55: per-pack "Create eBay Draft" progress, keyed the same way as expandedListingKeys etc.
+  // { status: "creating" | "done" | "error", offerId?, message? }. Not persisted -- a page refresh
+  // just resets the button; clicking again on an already-drafted pack surfaces eBay's own
+  // "offer already exists" error, which is informative enough on its own for a single-seller tool.
+  const [draftStates, setDraftStates] = useState({});
 
   const safeDiscount = Math.min(90, Math.max(0, Number(discountPct) || 0));
 
@@ -2006,6 +2011,41 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
     }
   }
 
+  // Round 55: the actual "Create eBay Draft" click handler -- creates an inventory item + an
+  // unpublished offer from one pack's listing-text sections (see buildListingSections). Images
+  // are limited to the pack's own standout cards (same 3 shown in the Photos section) and only
+  // included when they're a real fetchable URL -- eBay has to download them itself, so a local
+  // data: URL (a photo that's never been through savePhotoFile) is silently skipped rather than
+  // sent and rejected.
+  function createEbayDraft(key, pack, sections, finalPrice) {
+    setDraftStates((prev) => ({ ...prev, [key]: { status: "creating" } }));
+    const imageUrls = sections.topCards
+      .map((c) => getDisplay(c).front)
+      .filter(Boolean)
+      .map((src) => (src.startsWith("/photos/") ? `${window.location.origin}${src}` : src))
+      .filter((src) => src.startsWith("http://") || src.startsWith("https://"));
+    fetch("/api/ebay/create-draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sku: `bench-${pack.jobId}`,
+        title: sections.title,
+        description: sections.description,
+        price: finalPrice,
+        quantity: pack.listing.cards.length,
+        imageUrls,
+      }),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "eBay rejected the draft.");
+        setDraftStates((prev) => ({ ...prev, [key]: { status: "done", offerId: data.offerId } }));
+      })
+      .catch((e) => {
+        setDraftStates((prev) => ({ ...prev, [key]: { status: "error", message: String((e && e.message) || e) } }));
+      });
+  }
+
   const activeJobs = jobs.filter((j) => j.status === "processing");
   const erroredJobs = jobs.filter((j) => j.status === "error");
 
@@ -2102,7 +2142,12 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
 
       <div style={{ textAlign: "center", marginTop: 14, fontSize: 13 }}>
         {ebayStatus === null ? null : ebayStatus.connected ? (
-          <span style={{ opacity: 0.7 }}>eBay ({ebayStatus.env}): connected</span>
+          <span style={{ opacity: 0.7 }}>
+            eBay ({ebayStatus.env}): connected
+            {!ebayStatus.draftReady && (
+              <> -- add {ebayStatus.missingDraftConfig.join(", ")} in Portainer to enable one-click drafts</>
+            )}
+          </span>
         ) : ebayStatus.configured ? (
           <a href="/api/ebay/connect" className="btn-secondary" style={{ display: "inline-block", textDecoration: "none" }}>
             Connect eBay account ({ebayStatus.env})
@@ -2204,9 +2249,31 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                     <button type="button" className="link-btn" onClick={() => toggleListingExpanded(key)}>
                       {listingExpanded ? "Hide listing text" : "Listing text for eBay"}
                     </button>
+                    {ebayStatus && ebayStatus.connected && ebayStatus.draftReady && (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={draftStates[key]?.status === "creating"}
+                        onClick={() => createEbayDraft(key, pack, sections, suggested)}
+                      >
+                        {draftStates[key]?.status === "creating"
+                          ? "Creating draft…"
+                          : draftStates[key]?.status === "done"
+                            ? "Draft created ✓"
+                            : "Create eBay Draft"}
+                      </button>
+                    )}
                     <button type="button" className="btn-secondary" onClick={() => onDiscardJob(pack.jobId)}>Clear bundle</button>
                   </div>
                 </div>
+                {draftStates[key]?.status === "error" && (
+                  <p className="identify-error" style={{ margin: "0 14px 10px" }}>{draftStates[key].message}</p>
+                )}
+                {draftStates[key]?.status === "done" && (
+                  <p style={{ margin: "0 14px 10px", fontSize: 12.5, opacity: 0.75 }}>
+                    Saved as a draft on eBay (offer {draftStates[key].offerId}) -- add any missing photos and finish it from Seller Hub &gt; Drafts before publishing.
+                  </p>
+                )}
                 <p className="tile-sub" style={{ margin: "0 14px 10px" }}>
                   {breakdown.map(([t, n]) => `${t} (${n})`).join(", ")}
                 </p>
