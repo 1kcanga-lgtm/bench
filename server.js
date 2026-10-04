@@ -219,7 +219,10 @@ async function ebayApiRequest(method, apiPath, body) {
   const data = text ? JSON.parse(text) : {};
   if (!resp.ok) {
     const detail = (data.errors && data.errors[0] && data.errors[0].message) || data.error_description || data.error || JSON.stringify(data);
-    throw new Error(`eBay rejected the request (${resp.status}): ${detail}`);
+    const err = new Error(`eBay rejected the request (${resp.status}): ${detail}`);
+    err.status = resp.status;
+    err.ebayErrors = data.errors || [];
+    throw err;
   }
   return data;
 }
@@ -279,7 +282,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     // Step 2: the offer (price, category, business policies) that actually turns the inventory
     // item into something eBay will treat as a listing once published. Saved as-is; nothing
     // after this call ever touches publishOffer.
-    const offer = await ebayApiRequest("POST", "/sell/inventory/v1/offer", {
+    const offerBody = {
       sku,
       marketplaceId: EBAY_MARKETPLACE_ID,
       format: "FIXED_PRICE",
@@ -293,23 +296,67 @@ app.post("/api/ebay/create-draft", async (req, res) => {
         paymentPolicyId: EBAY_PAYMENT_POLICY_ID,
         returnPolicyId: EBAY_RETURN_POLICY_ID,
       },
-    });
-    res.json({ ok: true, sku, offerId: offer.offerId });
+    };
+    // eBay allows only one offer per SKU per marketplace, so createOffer fails with errorId
+    // 25002 ("Offer entity already exists") when this pack was already drafted once. Step 1's
+    // PUT is idempotent but this POST isn't -- so on a re-click, find the existing unpublished
+    // offer and update it in place instead, keeping the draft in sync with the pack's latest
+    // title/price/description rather than leaving the button permanently failing for that SKU.
+    let offerId;
+    try {
+      const offer = await ebayApiRequest("POST", "/sell/inventory/v1/offer", offerBody);
+      offerId = offer.offerId;
+    } catch (err) {
+      if (!(err.ebayErrors || []).some((e) => e.errorId === 25002)) throw err;
+      const existing = await ebayApiRequest(
+        "GET",
+        `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(EBAY_MARKETPLACE_ID)}`
+      );
+      const match = (existing.offers || []).find((o) => o.format === "FIXED_PRICE") || (existing.offers || [])[0];
+      if (!match) throw err;
+      offerId = match.offerId;
+      // updateOffer replaces the whole offer, so send the full body (minus sku/marketplaceId/
+      // format, which can't change on an existing offer).
+      const { sku: _sku, marketplaceId: _mkt, format: _fmt, ...updateBody } = offerBody;
+      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, updateBody);
+    }
+    res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
     res.status(502).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
-// Round 56: lets the frontend show what an unpublished offer actually contains. Worth having
-// because an offer created via the Inventory API (createOffer, never publishOffer) has NO page
-// anywhere on eBay's own site until it's actually published -- not in Seller Hub, not in My eBay,
-// nothing. That's true on both Sandbox and Production, confirmed via eBay's own docs and seller
-// community reports, not a bug on this app's end. This is the only way to see it before then.
+// Round 58: lets the frontend show what an unpublished offer actually contains, self-contained
+// in Bench -- no trip to API Explorer. Worth having because an offer created via the Inventory
+// API (createOffer, never publishOffer) has NO page anywhere on eBay's own site until it's
+// actually published -- not in Seller Hub, not in My eBay, nothing. True on both Sandbox and
+// Production, confirmed via eBay's own docs and seller community reports, not a bug on this
+// app's end. This is the only way to see it before then.
+//
+// eBay splits one listing across two objects: the offer (price, policies, category, description)
+// and the inventory item it references by SKU (title, photos, condition) -- Kaleb's first look at
+// this only showed the offer half. Fetch both and hand back a single flattened shape so the
+// frontend doesn't need to know about that split.
 app.get("/api/ebay/offer/:offerId", async (req, res) => {
   try {
     const offer = await ebayApiRequest("GET", `/sell/inventory/v1/offer/${encodeURIComponent(req.params.offerId)}`);
-    res.json({ ok: true, offer });
+    const item = await ebayApiRequest("GET", `/sell/inventory/v1/inventory_item/${encodeURIComponent(offer.sku)}`);
+    res.json({
+      ok: true,
+      offer: {
+        offerId: offer.offerId,
+        sku: offer.sku,
+        status: offer.status,
+        categoryId: offer.categoryId,
+        price: offer.pricingSummary && offer.pricingSummary.price,
+        availableQuantity: offer.availableQuantity,
+        listingDescription: offer.listingDescription,
+        title: (item.product && item.product.title) || null,
+        imageUrls: (item.product && item.product.imageUrls) || [],
+        condition: item.condition || null,
+      },
+    });
   } catch (err) {
     res.status(502).json({ error: { message: String((err && err.message) || err) } });
   }

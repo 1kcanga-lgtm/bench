@@ -2046,26 +2046,33 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
       });
   }
 
-  // Round 56: toggles a plain-JSON view of an already-created offer -- the only way to actually
-  // see what createEbayDraft made, since an unpublished Inventory API offer has no page anywhere
-  // on eBay's own site (confirmed via eBay's docs -- not something broken in this app).
+  // Round 56/58: shows what createEbayDraft actually made on eBay -- the only way to see it at
+  // all, since an unpublished Inventory API offer has no page anywhere on eBay's own site
+  // (confirmed via eBay's docs -- not something broken in this app). Round 58: the server now
+  // hands back title/photos/condition alongside the offer (eBay splits those across two separate
+  // objects internally), so this renders a real summary instead of a raw JSON dump -- no need to
+  // jump to eBay's API Explorer for any of it.
   function viewEbayOffer(key, offerId) {
     if (draftStates[key] && draftStates[key].offerDetails) {
       // already showing it -- toggle off rather than re-fetching
       setDraftStates((prev) => {
-        const { offerDetails, ...rest } = prev[key] || {};
+        const { offerDetails, offerDetailsError, ...rest } = prev[key] || {};
         return { ...prev, [key]: rest };
       });
       return;
     }
+    setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], loadingOffer: true, offerDetailsError: null } }));
     fetch(`/api/ebay/offer/${encodeURIComponent(offerId)}`)
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "Couldn't fetch that offer.");
-        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], offerDetails: JSON.stringify(data.offer, null, 2) } }));
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], loadingOffer: false, offerDetails: data.offer } }));
       })
       .catch((e) => {
-        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], offerDetails: `Couldn't load details: ${String((e && e.message) || e)}` } }));
+        setDraftStates((prev) => ({
+          ...prev,
+          [key]: { ...prev[key], loadingOffer: false, offerDetailsError: String((e && e.message) || e) },
+        }));
       });
   }
 
@@ -2299,24 +2306,50 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                       eBay's own site until it's published, so use the button below to check it rather than looking in
                       Seller Hub.
                     </p>
-                    <button type="button" className="link-btn" onClick={() => viewEbayOffer(key, draftStates[key].offerId)}>
-                      {draftStates[key].offerDetails ? "Hide draft details" : "View draft details"}
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => viewEbayOffer(key, draftStates[key].offerId)}
+                      disabled={draftStates[key].loadingOffer}
+                    >
+                      {draftStates[key].loadingOffer
+                        ? "Loading details…"
+                        : draftStates[key].offerDetails
+                          ? "Hide draft details"
+                          : "View draft details"}
                     </button>
+                    {draftStates[key].offerDetailsError && (
+                      <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].offerDetailsError}</p>
+                    )}
                     {draftStates[key].offerDetails && (
-                      <pre
-                        style={{
-                          fontSize: 11.5,
-                          background: "var(--panel, #f4f1e8)",
-                          padding: 10,
-                          borderRadius: 6,
-                          overflowX: "auto",
-                          marginTop: 6,
-                          whiteSpace: "pre-wrap",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {draftStates[key].offerDetails}
-                      </pre>
+                      <div style={{ marginTop: 6, background: "var(--panel, #f4f1e8)", borderRadius: 6, padding: 10 }}>
+                        <p style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600 }}>
+                          {draftStates[key].offerDetails.title || "(no title saved on the listing)"}
+                        </p>
+                        {draftStates[key].offerDetails.imageUrls && draftStates[key].offerDetails.imageUrls.length > 0 && (
+                          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                            {draftStates[key].offerDetails.imageUrls.slice(0, 3).map((url, i) => (
+                              <div key={i} className="photo-thumb" style={{ width: 70, height: 97 }}>
+                                <CardImage src={url} fallbackLabel="No image" />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <p style={{ margin: "0 0 8px", fontSize: 12.5, opacity: 0.8 }}>
+                          {draftStates[key].offerDetails.price && draftStates[key].offerDetails.price.value
+                            ? money(draftStates[key].offerDetails.price.value)
+                            : "no price set"}
+                          {draftStates[key].offerDetails.availableQuantity != null &&
+                            ` · qty ${draftStates[key].offerDetails.availableQuantity}`}
+                          {draftStates[key].offerDetails.condition && ` · ${draftStates[key].offerDetails.condition}`}
+                          {draftStates[key].offerDetails.status && ` · ${draftStates[key].offerDetails.status}`}
+                        </p>
+                        {draftStates[key].offerDetails.listingDescription && (
+                          <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                            {draftStates[key].offerDetails.listingDescription}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
