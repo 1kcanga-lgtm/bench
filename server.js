@@ -219,7 +219,10 @@ async function ebayApiRequest(method, apiPath, body) {
   const data = text ? JSON.parse(text) : {};
   if (!resp.ok) {
     const detail = (data.errors && data.errors[0] && data.errors[0].message) || data.error_description || data.error || JSON.stringify(data);
-    throw new Error(`eBay rejected the request (${resp.status}): ${detail}`);
+    const err = new Error(`eBay rejected the request (${resp.status}): ${detail}`);
+    err.status = resp.status;
+    err.ebayErrors = data.errors || [];
+    throw err;
   }
   return data;
 }
@@ -279,7 +282,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     // Step 2: the offer (price, category, business policies) that actually turns the inventory
     // item into something eBay will treat as a listing once published. Saved as-is; nothing
     // after this call ever touches publishOffer.
-    const offer = await ebayApiRequest("POST", "/sell/inventory/v1/offer", {
+    const offerBody = {
       sku,
       marketplaceId: EBAY_MARKETPLACE_ID,
       format: "FIXED_PRICE",
@@ -293,8 +296,31 @@ app.post("/api/ebay/create-draft", async (req, res) => {
         paymentPolicyId: EBAY_PAYMENT_POLICY_ID,
         returnPolicyId: EBAY_RETURN_POLICY_ID,
       },
-    });
-    res.json({ ok: true, sku, offerId: offer.offerId });
+    };
+    // eBay allows only one offer per SKU per marketplace, so createOffer fails with errorId
+    // 25002 ("Offer entity already exists") when this pack was already drafted once. Step 1's
+    // PUT is idempotent but this POST isn't -- so on a re-click, find the existing unpublished
+    // offer and update it in place instead, keeping the draft in sync with the pack's latest
+    // title/price/description rather than leaving the button permanently failing for that SKU.
+    let offerId;
+    try {
+      const offer = await ebayApiRequest("POST", "/sell/inventory/v1/offer", offerBody);
+      offerId = offer.offerId;
+    } catch (err) {
+      if (!(err.ebayErrors || []).some((e) => e.errorId === 25002)) throw err;
+      const existing = await ebayApiRequest(
+        "GET",
+        `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(EBAY_MARKETPLACE_ID)}`
+      );
+      const match = (existing.offers || []).find((o) => o.format === "FIXED_PRICE") || (existing.offers || [])[0];
+      if (!match) throw err;
+      offerId = match.offerId;
+      // updateOffer replaces the whole offer, so send the full body (minus sku/marketplaceId/
+      // format, which can't change on an existing offer).
+      const { sku: _sku, marketplaceId: _mkt, format: _fmt, ...updateBody } = offerBody;
+      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`, updateBody);
+    }
+    res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
     res.status(502).json({ error: { message: String((err && err.message) || err) } });
