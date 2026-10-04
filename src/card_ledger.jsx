@@ -2201,9 +2201,45 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                 </p>
                 {listingExpanded && (
                   <div className="listing-sections" style={{ margin: "0 14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600, opacity: 0.75 }}>Title (80 character max)</label>
+                        <button type="button" className="btn-secondary" onClick={() => copySection(sections.title, `${key}-title`)}>
+                          {copiedKey === `${key}-title` ? "Copied!" : "Copy"}
+                        </button>
+                      </div>
+                      <textarea
+                        className="team-lot-blurb"
+                        readOnly
+                        value={sections.title}
+                        rows={2}
+                        onClick={(e) => e.target.select()}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 12, fontWeight: 600, opacity: 0.75, display: "block", marginBottom: 6 }}>
+                        Photos -- front of the {sections.topCards.length === 1 ? "most valuable card" : `top ${sections.topCards.length} most valuable cards`}
+                      </label>
+                      {sections.topCards.length === 0 ? (
+                        <p style={{ fontSize: 12.5, opacity: 0.6, margin: 0 }}>No valued cards in this lot yet to pull photos from.</p>
+                      ) : (
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {sections.topCards.map((c) => {
+                            const display = getDisplay(c);
+                            return (
+                              <div key={c.id} style={{ width: 90, textAlign: "center" }}>
+                                <div className="photo-thumb" style={{ width: 90, height: 124, margin: "0 auto" }}>
+                                  <CardImage src={display.front} alt={`${c.player} front`} fallbackLabel="No front photo" />
+                                </div>
+                                <div style={{ fontSize: 11, marginTop: 4, lineHeight: 1.3 }}>{c.player}</div>
+                                <div style={{ fontSize: 10.5, opacity: 0.6 }}>~{moneyWhole(c.value)}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                     {[
-                      { label: "Title (80 character max)", text: sections.title, rows: 2, sectionKey: "title" },
-                      { label: "Photos", text: sections.photos, rows: 4, sectionKey: "photos" },
                       { label: "Item specifics", text: sections.itemSpecifics, rows: 5, sectionKey: "specifics" },
                       { label: "Description", text: sections.description, rows: 10, sectionKey: "description" },
                       { label: "Pricing settings", text: sections.pricingSettings, rows: 2, sectionKey: "pricing" },
@@ -2668,7 +2704,11 @@ function ebayListingTitle(listing, finalPrice) {
   const years = listing.cards
     .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
     .filter((n) => !isNaN(n));
-  const yearLabel = years.length && Math.min(...years) === Math.max(...years) ? String(Math.min(...years)) : "Mixed Years";
+  const yearLabel = years.length
+    ? Math.min(...years) === Math.max(...years)
+      ? String(Math.min(...years))
+      : `${Math.min(...years)}-${Math.max(...years)}`
+    : "Mixed Years";
   const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
   const brandLabel = brands.length === 1 ? brands[0] : "Mixed Brands";
   const yearsBrandsLabel = yearLabel === "Mixed Years" && brandLabel === "Mixed Brands" ? "Mixed Years/Brands" : `${yearLabel}/${brandLabel}`;
@@ -2699,6 +2739,10 @@ function buildListingSections(listing, discountPct) {
 
   const title = ebayListingTitle(listing, suggested);
 
+  // Round 52: BundlingPanel shows actual front-of-card photos for the top standouts instead of
+  // this text (see topCards below) -- kept here only so SellerPanel's older single-blob "Copy
+  // listing" (buildListingCopyText) still has a PHOTOS section to paste, since that one has no
+  // UI for showing real images.
   const photos = [
     "1. Main photo: the whole stack fanned out on a plain background, with the team's best card on top",
     "2. Close-ups of the 2 or 3 top cards, front and back",
@@ -2736,7 +2780,12 @@ function buildListingSections(listing, discountPct) {
     "Shipping: calculated or flat, with a per-additional-lot discount",
   ].join("\n");
 
-  return { title, photos, itemSpecifics, description, pricingSettings };
+  // The actual cards BundlingPanel's "Photos" section shows -- the lot's top standouts (same
+  // ones called out in the description above), so Kaleb can grab real front photos straight
+  // from the lot rather than following a generic photo checklist.
+  const topCards = standouts;
+
+  return { title, photos, topCards, itemSpecifics, description, pricingSettings };
 }
 
 function buildListingCopyText(listing, discountPct) {
