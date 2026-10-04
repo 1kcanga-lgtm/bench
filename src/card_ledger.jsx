@@ -2586,22 +2586,76 @@ function listingTeamBreakdown(listing) {
   return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
 }
 
+// Round 49: Kaleb's own eBay listing template, pasted in verbatim with bracket placeholders --
+// this builds the exact same section structure (TITLE/PHOTOS/ITEM SPECIFICS/DESCRIPTION/PRICING
+// SETTINGS) with those placeholders filled from the pack's real data. The PHOTOS and PRICING
+// SETTINGS sections, and most of the DESCRIPTION boilerplate (intro, condition/shipping,
+// disclaimer), are Kaleb's fixed wording every time -- only the bracketed bits are templated.
+function ebayListingTitle(listing, finalPrice) {
+  const subject = listing.kind === "mixed" ? "Mixed Teams" : listing.team;
+  const years = listing.cards
+    .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
+    .filter((n) => !isNaN(n));
+  const yearLabel = years.length && Math.min(...years) === Math.max(...years) ? String(Math.min(...years)) : "Mixed Years";
+  const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
+  const brandLabel = brands.length === 1 ? brands[0] : "Mixed Brands";
+  const yearsBrandsLabel = yearLabel === "Mixed Years" && brandLabel === "Mixed Brands" ? "Mixed Years/Brands" : `${yearLabel}/${brandLabel}`;
+  // 80-character eBay title limit -- drop the least essential clauses in order until it fits,
+  // and only hard-truncate as a last resort.
+  const attempts = [
+    `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel} - Est. ${moneyWhole(listing.total)} Value - NHL`,
+    `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel} - Est. ${moneyWhole(listing.total)} Value`,
+    `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel}`,
+  ];
+  const fit = attempts.find((t) => t.length <= 80);
+  return fit || attempts[attempts.length - 1].slice(0, 77) + "...";
+}
+
 function buildListingCopyText(listing, discountPct) {
   const suggested = listing.total * (1 - discountPct / 100);
+  const subject = listing.kind === "mixed" ? "Mixed Teams" : listing.team;
+  const standouts = listing.cards
+    .filter((c) => Number(c.value) > 0)
+    .sort((a, b) => (b.value || 0) - (a.value || 0))
+    .slice(0, 3);
+  const remainingCount = listing.cards.length - standouts.length;
+
   const lines = [
-    suggestedListingTitle(listing),
+    "TITLE (80 character max)",
+    ebayListingTitle(listing, suggested),
     "",
-    // Round 48: a ready-to-paste eBay description paragraph (same style as the Team Lots blurb),
-    // not just a bare price line -- this is the part Kaleb actually drops into the listing body.
-    buildPackBlurb(listing, suggested),
+    "PHOTOS",
+    "1. Main photo: the whole stack fanned out on a plain background, with the team's best card on top",
+    "2. Close-ups of the 2 or 3 top cards, front and back",
+    "3. A photo of the packaged lot in its team bag, so buyers know what arrives",
+    "4. Optional: a screenshot of your Bench value breakdown for that team",
     "",
-    `(book value ${money(listing.total)}, ${discountPct}% off)`,
-    listing.kind === "mixed"
-      ? `${listing.cards.length} cards — ${listingTeamBreakdown(listing).map(([t, n]) => `${t} (${n})`).join(", ")}`
-      : `${listing.cards.length} cards — ${listing.team}`,
+    "ITEM SPECIFICS",
+    "Sport: Ice Hockey",
+    `Team: ${subject}`,
+    "Type: Lot",
+    `Quantity: ${listing.cards.length}`,
+    "Condition: Ungraded (raw, played/pulled from a personal collection)",
     "",
-    "Cards included:",
-    ...listing.cards.map((c) => `${[c.year, c.brand, c.set].filter(Boolean).join(" ")} ${c.player}${c.cardNumber ? ` #${c.cardNumber}` : ""} — ${moneyOrDash(c.value)}`),
+    "DESCRIPTION",
+    `${subject} Lot: ${listing.cards.length} Cards`,
+    "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
+    "",
+    "What's in the lot",
+    ...standouts.map((c) => `${c.player}, ${[c.year, c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}: ~${moneyWhole(c.value)}`),
+    ...(remainingCount > 0 ? [`Plus ${remainingCount} additional card${remainingCount === 1 ? "" : "s"} (commons, base, a few inserts)`] : []),
+    "",
+    "The math",
+    `Estimated value if sold individually: ~${moneyWhole(listing.total)}`,
+    `Lot price: ${moneyWhole(suggested)} (about ${discountPct}% off)`,
+    "",
+    "Condition and shipping",
+    "Raw cards, stored in sleeves/team bags, no grading. Ships in a padded mailer between cardboard stiffeners via USPS with tracking. Combined shipping if you buy more than one team lot.",
+    "Valuations are estimates based on recent sold comps, not guarantees. Message me with any questions.",
+    "",
+    "PRICING SETTINGS",
+    `Buy It Now at ${moneyWhole(suggested)}, Best Offer enabled`,
+    "Shipping: calculated or flat, with a per-additional-lot discount",
   ];
   return lines.join("\n");
 }
