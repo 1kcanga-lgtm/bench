@@ -301,6 +301,20 @@ app.post("/api/ebay/create-draft", async (req, res) => {
   }
 });
 
+// Round 56: lets the frontend show what an unpublished offer actually contains. Worth having
+// because an offer created via the Inventory API (createOffer, never publishOffer) has NO page
+// anywhere on eBay's own site until it's actually published -- not in Seller Hub, not in My eBay,
+// nothing. That's true on both Sandbox and Production, confirmed via eBay's own docs and seller
+// community reports, not a bug on this app's end. This is the only way to see it before then.
+app.get("/api/ebay/offer/:offerId", async (req, res) => {
+  try {
+    const offer = await ebayApiRequest("GET", `/sell/inventory/v1/offer/${encodeURIComponent(req.params.offerId)}`);
+    res.json({ ok: true, offer });
+  } catch (err) {
+    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+  }
+});
+
 app.get("/api/ebay/connect", (req, res) => {
   if (!EBAY_CONFIGURED) {
     return res

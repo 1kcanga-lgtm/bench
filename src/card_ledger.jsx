@@ -2046,6 +2046,29 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
       });
   }
 
+  // Round 56: toggles a plain-JSON view of an already-created offer -- the only way to actually
+  // see what createEbayDraft made, since an unpublished Inventory API offer has no page anywhere
+  // on eBay's own site (confirmed via eBay's docs -- not something broken in this app).
+  function viewEbayOffer(key, offerId) {
+    if (draftStates[key] && draftStates[key].offerDetails) {
+      // already showing it -- toggle off rather than re-fetching
+      setDraftStates((prev) => {
+        const { offerDetails, ...rest } = prev[key] || {};
+        return { ...prev, [key]: rest };
+      });
+      return;
+    }
+    fetch(`/api/ebay/offer/${encodeURIComponent(offerId)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "Couldn't fetch that offer.");
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], offerDetails: JSON.stringify(data.offer, null, 2) } }));
+      })
+      .catch((e) => {
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], offerDetails: `Couldn't load details: ${String((e && e.message) || e)}` } }));
+      });
+  }
+
   const activeJobs = jobs.filter((j) => j.status === "processing");
   const erroredJobs = jobs.filter((j) => j.status === "error");
 
@@ -2270,9 +2293,32 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                   <p className="identify-error" style={{ margin: "0 14px 10px" }}>{draftStates[key].message}</p>
                 )}
                 {draftStates[key]?.status === "done" && (
-                  <p style={{ margin: "0 14px 10px", fontSize: 12.5, opacity: 0.75 }}>
-                    Saved as a draft on eBay (offer {draftStates[key].offerId}) -- add any missing photos and finish it from Seller Hub &gt; Drafts before publishing.
-                  </p>
+                  <div style={{ margin: "0 14px 10px" }}>
+                    <p style={{ fontSize: 12.5, opacity: 0.75, margin: "0 0 4px" }}>
+                      Saved as a draft on eBay (offer {draftStates[key].offerId}) -- this kind of draft has no page on
+                      eBay's own site until it's published, so use the button below to check it rather than looking in
+                      Seller Hub.
+                    </p>
+                    <button type="button" className="link-btn" onClick={() => viewEbayOffer(key, draftStates[key].offerId)}>
+                      {draftStates[key].offerDetails ? "Hide draft details" : "View draft details"}
+                    </button>
+                    {draftStates[key].offerDetails && (
+                      <pre
+                        style={{
+                          fontSize: 11.5,
+                          background: "var(--panel, #f4f1e8)",
+                          padding: 10,
+                          borderRadius: 6,
+                          overflowX: "auto",
+                          marginTop: 6,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {draftStates[key].offerDetails}
+                      </pre>
+                    )}
+                  </div>
                 )}
                 <p className="tile-sub" style={{ margin: "0 14px 10px" }}>
                   {breakdown.map(([t, n]) => `${t} (${n})`).join(", ")}
