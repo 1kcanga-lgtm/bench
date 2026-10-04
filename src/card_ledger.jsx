@@ -2735,7 +2735,6 @@ function buildListingSections(listing, discountPct) {
     .filter((c) => Number(c.value) > 0)
     .sort((a, b) => (b.value || 0) - (a.value || 0))
     .slice(0, 3);
-  const remainingCount = listing.cards.length - standouts.length;
 
   const title = ebayListingTitle(listing, suggested);
 
@@ -2763,8 +2762,7 @@ function buildListingSections(listing, discountPct) {
     "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
     "",
     "What's in the lot",
-    ...standouts.map((c) => `${c.player}, ${[c.year, c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}: ~${moneyWhole(c.value)}`),
-    ...(remainingCount > 0 ? [`Plus ${remainingCount} additional card${remainingCount === 1 ? "" : "s"} (commons, base, a few inserts)`] : []),
+    ...listing.cards.map((c) => `${c.player}, ${[c.year, c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}`),
     "",
     "The math",
     `Estimated value if sold individually: ~${moneyWhole(listing.total)}`,
