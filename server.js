@@ -49,33 +49,51 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // "no key, clear error, nothing crashes" shape as the Anthropic key above. EBAY_ENV defaults to
 // "sandbox" on purpose -- this only ever talks to Production if that's deliberately flipped once
 // everything's been proven out safely.
+//
+// Round 61: Kaleb's gone live -- he wants to keep listing for real on Production AND keep the
+// ability to safely test future Bench features in Sandbox first, the same discipline this whole
+// eBay feature has been built with since round 50. So every credential below now comes in TWO
+// env vars, EBAY_SANDBOX_<name> and EBAY_PRODUCTION_<name>, and EBAY_ENV just picks which set is
+// actually read -- flipping it (and redeploying) switches environments without retyping anything
+// or losing the other environment's setup. Everything after this block still refers to the same
+// plain EBAY_APP_ID / EBAY_FULFILLMENT_POLICY_ID / etc. names it always has; only this resolution
+// step is new.
 const EBAY_ENV = process.env.EBAY_ENV || "sandbox";
-const EBAY_APP_ID = process.env.EBAY_APP_ID || "";
-const EBAY_CERT_ID = process.env.EBAY_CERT_ID || "";
-const EBAY_RUNAME = process.env.EBAY_RUNAME || "";
-const EBAY_OAUTH_BASE = EBAY_ENV === "production" ? "https://auth.ebay.com" : "https://auth.sandbox.ebay.com";
-const EBAY_API_BASE = EBAY_ENV === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
+const EBAY_IS_PRODUCTION = EBAY_ENV === "production";
+const EBAY_ENV_PREFIX = EBAY_IS_PRODUCTION ? "EBAY_PRODUCTION_" : "EBAY_SANDBOX_";
+function ebayEnvVar(suffix) {
+  return process.env[`${EBAY_ENV_PREFIX}${suffix}`] || "";
+}
+const EBAY_APP_ID = ebayEnvVar("APP_ID");
+const EBAY_CERT_ID = ebayEnvVar("CERT_ID");
+const EBAY_RUNAME = ebayEnvVar("RUNAME");
+const EBAY_OAUTH_BASE = EBAY_IS_PRODUCTION ? "https://auth.ebay.com" : "https://auth.sandbox.ebay.com";
+const EBAY_API_BASE = EBAY_IS_PRODUCTION ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
 const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
 const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
 
 // Round 55: config for the actual "create eBay draft" call (createOrReplaceInventoryItem +
 // createOffer -- NEVER publishOffer, same draft-only requirement as always). Business policies
 // have no Sandbox UI -- Kaleb has to create them via eBay's API Explorer (createFulfillmentPolicy
-// /createPaymentPolicy/createReturnPolicy) and copy the resulting policy IDs in here. Deliberately
-// NOT folded into EBAY_CONFIGURED above: a seller can finish connecting their eBay account (OAuth)
-// before they've set up policies, and /api/ebay/status (below) tells the frontend the two readiness
-// states separately so the UI can say exactly what's still missing.
+// /createPaymentPolicy/createReturnPolicy) and copy the resulting policy IDs in here; on
+// Production, these same three are created in eBay's own Seller Hub (Account > Business Policies)
+// and then just looked up (getFulfillmentPolicies/getPaymentPolicies/getReturnPolicies) rather than
+// created via API. Deliberately NOT folded into EBAY_CONFIGURED above: a seller can finish
+// connecting their eBay account (OAuth) before they've set up policies, and /api/ebay/status
+// (below) tells the frontend the two readiness states separately so the UI can say exactly what's
+// still missing.
 const EBAY_MARKETPLACE_ID = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
 // Sports Mem, Cards & Fan Shop > Sports Trading Cards > Ice Hockey -- confirmed by its browse-node
 // URL pattern on ebay.com; override via env if that ever turns out wrong for this account/marketplace.
+// Shared across both environments -- eBay's category tree is the same catalog on Sandbox and
+// Production, not a per-account credential.
 const EBAY_CATEGORY_ID = process.env.EBAY_CATEGORY_ID || "261328";
 // Inventory API's condition enum has no single obvious value for "raw, ungraded trading card" --
-// USED_GOOD is the closest generic fit. Override via env if Kaleb's first real draft comes back
-// with a condition error; this isn't something verifiable from this sandboxed dev environment.
+// USED_GOOD is the closest generic fit. Also shared across environments, same reasoning as above.
 const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_GOOD";
-const EBAY_FULFILLMENT_POLICY_ID = process.env.EBAY_FULFILLMENT_POLICY_ID || "";
-const EBAY_PAYMENT_POLICY_ID = process.env.EBAY_PAYMENT_POLICY_ID || "";
-const EBAY_RETURN_POLICY_ID = process.env.EBAY_RETURN_POLICY_ID || "";
+const EBAY_FULFILLMENT_POLICY_ID = ebayEnvVar("FULFILLMENT_POLICY_ID");
+const EBAY_PAYMENT_POLICY_ID = ebayEnvVar("PAYMENT_POLICY_ID");
+const EBAY_RETURN_POLICY_ID = ebayEnvVar("RETURN_POLICY_ID");
 const EBAY_DRAFT_CONFIGURED = !!(EBAY_FULFILLMENT_POLICY_ID && EBAY_PAYMENT_POLICY_ID && EBAY_RETURN_POLICY_ID);
 
 // Round 59: config for actually PUBLISHING a draft -- turning it into a real, live eBay listing,
@@ -85,15 +103,19 @@ const EBAY_DRAFT_CONFIGURED = !!(EBAY_FULFILLMENT_POLICY_ID && EBAY_PAYMENT_POLI
 // publish side effects. Creating that location needs only a country + postal code -- same
 // shipping-origin info any real eBay listing already discloses to buyers, no street address
 // required. EBAY_MERCHANT_LOCATION_KEY isn't something Kaleb needs to set -- it's just an internal
-// id for the one location this app uses, fixed here rather than left as an env var.
+// id for the one location this app uses, fixed here rather than left as an env var (one per
+// environment happens automatically: Sandbox and Production each keep their own Inventory
+// Location under this same key, since they're entirely separate eBay accounts/data as far as the
+// API is concerned).
 const EBAY_MERCHANT_LOCATION_KEY = "bench-main";
+// Shared across environments -- Kaleb ships from the same place either way.
 const EBAY_LOCATION_COUNTRY = process.env.EBAY_LOCATION_COUNTRY || "US";
-const EBAY_LOCATION_POSTAL_CODE = process.env.EBAY_LOCATION_POSTAL_CODE || "";
+const EBAY_LOCATION_POSTAL_CODE = ebayEnvVar("LOCATION_POSTAL_CODE");
 const EBAY_PUBLISH_CONFIGURED = !!EBAY_LOCATION_POSTAL_CODE;
 // Sandbox and production listings live at different hosts once published -- confirmed via eBay's
 // developer community (the sandbox item page is sandbox.ebay.com/itm/{listingId}, not under the
 // api.sandbox.ebay.com API host used for calls above).
-const EBAY_VIEW_BASE = EBAY_ENV === "production" ? "https://www.ebay.com/itm" : "https://sandbox.ebay.com/itm";
+const EBAY_VIEW_BASE = EBAY_IS_PRODUCTION ? "https://www.ebay.com/itm" : "https://sandbox.ebay.com/itm";
 // Root folder Bulk Auto-Import is allowed to read from -- bind-mount your actual scan folder to
 // this path (see docker-compose.yml's IMPORT_DIR). Deliberately a single fixed root rather than
 // letting the browser pass an arbitrary filesystem path: the frontend only ever supplies a name
@@ -174,15 +196,17 @@ app.put("/api/storage/:key", (req, res) => {
 
 // --- eBay OAuth (Sell API) ----------------------------------------------------------------
 // The refresh token (and a cached access token) ride in the same kv table as everything else --
-// no new storage mechanism, no new file to lose track of. One connected eBay account for the
-// whole app, same as there's one Anthropic key for the whole app; fine for a single-seller
-// self-hosted tool.
+// no new storage mechanism, no new file to lose track of. One connected eBay account per
+// environment -- round 61: the storage key is namespaced by EBAY_ENV so Sandbox's and
+// Production's connections live side by side and flipping EBAY_ENV doesn't clobber or confuse
+// the other one's tokens (they're different eBay accounts as far as the API is concerned, and
+// need their own OAuth consent anyway).
 function getEbayTokens() {
-  const row = getStmt.get("ebay-oauth-tokens");
+  const row = getStmt.get(`ebay-oauth-tokens-${EBAY_ENV}`);
   return row ? JSON.parse(row.value) : null;
 }
 function setEbayTokens(tokens) {
-  setStmt.run("ebay-oauth-tokens", JSON.stringify(tokens));
+  setStmt.run(`ebay-oauth-tokens-${EBAY_ENV}`, JSON.stringify(tokens));
 }
 
 // Returns a currently-valid access token, refreshing it first if it's missing or close to
@@ -254,17 +278,20 @@ app.get("/api/ebay/status", (req, res) => {
     // frontend exactly which env vars are still missing so it can say so instead of just hiding
     // the "Create eBay Draft" button with no explanation.
     draftReady: EBAY_DRAFT_CONFIGURED,
+    // Round 61: names the actual env var that's missing for the environment currently active
+    // (EBAY_SANDBOX_... or EBAY_PRODUCTION_...), not just the bare suffix -- there are two of
+    // each now, and the frontend should point at the one that matters right now.
     missingDraftConfig: EBAY_DRAFT_CONFIGURED
       ? []
       : [
-          !EBAY_FULFILLMENT_POLICY_ID && "EBAY_FULFILLMENT_POLICY_ID",
-          !EBAY_PAYMENT_POLICY_ID && "EBAY_PAYMENT_POLICY_ID",
-          !EBAY_RETURN_POLICY_ID && "EBAY_RETURN_POLICY_ID",
+          !EBAY_FULFILLMENT_POLICY_ID && `${EBAY_ENV_PREFIX}FULFILLMENT_POLICY_ID`,
+          !EBAY_PAYMENT_POLICY_ID && `${EBAY_ENV_PREFIX}PAYMENT_POLICY_ID`,
+          !EBAY_RETURN_POLICY_ID && `${EBAY_ENV_PREFIX}RETURN_POLICY_ID`,
         ].filter(Boolean),
     // Round 59: same "tell the frontend exactly what's missing" shape as draftReady above, for
     // actually publishing a draft rather than just creating it.
     publishReady: EBAY_PUBLISH_CONFIGURED,
-    missingPublishConfig: EBAY_PUBLISH_CONFIGURED ? [] : ["EBAY_LOCATION_POSTAL_CODE"],
+    missingPublishConfig: EBAY_PUBLISH_CONFIGURED ? [] : [`${EBAY_ENV_PREFIX}LOCATION_POSTAL_CODE`],
   });
 });
 
@@ -277,7 +304,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     return res.status(400).json({
       error: {
         message:
-          "eBay business policies aren't set up on this server yet. Add EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, and EBAY_RETURN_POLICY_ID to the stack's environment variables in Portainer and redeploy.",
+          `eBay business policies aren't set up for ${EBAY_ENV} yet. Add ${EBAY_ENV_PREFIX}FULFILLMENT_POLICY_ID, ${EBAY_ENV_PREFIX}PAYMENT_POLICY_ID, and ${EBAY_ENV_PREFIX}RETURN_POLICY_ID to the stack's environment variables in Portainer and redeploy.`,
       },
     });
   }
@@ -379,7 +406,7 @@ app.post("/api/ebay/publish/:offerId", async (req, res) => {
     return res.status(400).json({
       error: {
         message:
-          "eBay isn't set up to publish listings yet -- add EBAY_LOCATION_POSTAL_CODE (the ZIP code you ship from) to the stack's environment variables in Portainer and redeploy.",
+          `eBay isn't set up to publish listings on ${EBAY_ENV} yet -- add ${EBAY_ENV_PREFIX}LOCATION_POSTAL_CODE (the ZIP code you ship from) to the stack's environment variables in Portainer and redeploy.`,
       },
     });
   }
@@ -446,7 +473,7 @@ app.get("/api/ebay/connect", (req, res) => {
     return res
       .status(400)
       .send(
-        "eBay isn't configured on this server yet. Set EBAY_APP_ID, EBAY_CERT_ID, and EBAY_RUNAME in the stack's environment variables in Portainer and redeploy, then try again."
+        `eBay isn't configured for ${EBAY_ENV} on this server yet. Set ${EBAY_ENV_PREFIX}APP_ID, ${EBAY_ENV_PREFIX}CERT_ID, and ${EBAY_ENV_PREFIX}RUNAME in the stack's environment variables in Portainer and redeploy, then try again.`
       );
   }
   // eBay's OAuth quirk: the redirect_uri parameter here is the RuName itself (an opaque
