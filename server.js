@@ -72,14 +72,10 @@ const EBAY_API_BASE = EBAY_IS_PRODUCTION ? "https://api.ebay.com" : "https://api
 // Round 62: a separate host from EBAY_API_BASE -- eBay's Identity API (used only so Bench can show
 // Kaleb which eBay username it's actually connected as) lives under apiz.*, not api.*.
 const EBAY_IDENTITY_BASE = EBAY_IS_PRODUCTION ? "https://apiz.ebay.com" : "https://apiz.sandbox.ebay.com";
-const EBAY_SCOPES = [
-  "https://api.ebay.com/oauth/api_scope/sell.inventory",
-  // Round 62: lets the callback ask eBay "who is this token actually signed in as", so Bench can
-  // show "connected as rinkside_cards" instead of a bare connected/disconnected toggle -- added
-  // after Kaleb nearly connected Production under the wrong eBay login and had no way in the app
-  // itself to double-check which account it had grabbed.
-  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
-];
+// Round 62's commerce.identity.readonly scope was reverted: token refreshes started failing with
+// "exceeds the scope granted to the client", breaking draft creation. Without it the callback's
+// identity lookup just fails (non-fatal), so the "connected as X" username stays blank.
+const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
 const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
 
 // Round 55: config for the actual "create eBay draft" call (createOrReplaceInventoryItem +
@@ -389,7 +385,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -447,7 +443,7 @@ app.post("/api/ebay/publish/:offerId", async (req, res) => {
     res.json({ ok: true, listingId, viewUrl: listingId ? `${EBAY_VIEW_BASE}/${encodeURIComponent(listingId)}` : null });
   } catch (err) {
     console.error("eBay publish failed:", err);
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -482,7 +478,7 @@ app.get("/api/ebay/offer/:offerId", async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -595,7 +591,7 @@ app.post("/api/anthropic/messages", async (req, res) => {
     const data = await upstream.json();
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: { type: "proxy_error", message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { type: "proxy_error", message: String((err && err.message) || err) } });
   }
 });
 
