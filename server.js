@@ -94,9 +94,10 @@ const EBAY_MARKETPLACE_ID = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
 // Shared across both environments -- eBay's category tree is the same catalog on Sandbox and
 // Production, not a per-account credential.
 const EBAY_CATEGORY_ID = process.env.EBAY_CATEGORY_ID || "261328";
-// Inventory API's condition enum has no single obvious value for "raw, ungraded trading card" --
-// USED_GOOD is the closest generic fit. Also shared across environments, same reasoning as above.
-const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_GOOD";
+// For trading card categories eBay treats condition ID 4000 (USED_VERY_GOOD in the Inventory API)
+// as "ungraded" -- USED_GOOD isn't valid for this category at all, and publishing failed with it.
+// Also shared across environments, same reasoning as above.
+const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_VERY_GOOD";
 const EBAY_FULFILLMENT_POLICY_ID = ebayEnvVar("FULFILLMENT_POLICY_ID");
 const EBAY_PAYMENT_POLICY_ID = ebayEnvVar("PAYMENT_POLICY_ID");
 const EBAY_RETURN_POLICY_ID = ebayEnvVar("RETURN_POLICY_ID");
