@@ -114,12 +114,14 @@ const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_VERY_GOOD";
 // publish time), so a draft can exist fine without it -- it's a separate validation pass.
 // Researched eBay's own package-type enum and weight/dimension schema (nothing specific to this
 // in the generic "publishing offers" requirements doc -- like conditionDescriptors, it's a
-// shipping-policy-driven requirement, not a generically-documented one). Defaults are a rough
-// estimate for a ~50-card lot shipped in a padded/rigid mailer (cards + toploaders + packaging);
-// tune the two env vars below if Kaleb's actual shipped weights run meaningfully different --
-// eBay uses this number to quote the buyer's calculated shipping cost, so a bad estimate shows
-// buyers the wrong shipping price rather than breaking the listing outright.
-const EBAY_PACKAGE_WEIGHT_OZ = Number(process.env.EBAY_PACKAGE_WEIGHT_OZ) || 8;
+// shipping-policy-driven requirement, not a generically-documented one). 3.65 is Kaleb's own
+// measured weight (cards + packaging) for a typical 50-card lot -- replaces an earlier guessed
+// default of 8. Still just one flat number for every lot regardless of card count, so it'll be
+// off for a lot that isn't ~50 cards; tune via the env var below, or revisit if lot sizes vary
+// enough to be worth scaling this with quantity instead of a flat constant. eBay uses this number
+// to quote the buyer's calculated shipping cost, so a bad estimate shows buyers the wrong
+// shipping price rather than breaking the listing outright.
+const EBAY_PACKAGE_WEIGHT_OZ = Number(process.env.EBAY_PACKAGE_WEIGHT_OZ) || 3.65;
 const EBAY_PACKAGE_TYPE = process.env.EBAY_PACKAGE_TYPE || "PACKAGE_THICK_ENVELOPE";
 // Dimensions for that same padded mailer -- included alongside weight (even though eBay's error
 // only named weight) since calculated-shipping carriers can also need package size, and it costs
@@ -436,6 +438,41 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
+  }
+});
+
+// Round 62 follow-up: lets a stuck draft be deleted and recreated from scratch. Added after a
+// draft that had been revised via the API many times in one debugging session started failing
+// publish with eBay's generic "Cannot revise listing... violation of eBay policy" message --
+// confirmed NOT an actual account/policy problem (a brand-new listing published fine straight
+// through eBay's own website, same account, same session), so the leading theory is that this
+// one offer/inventory item picked up some bad internal state from being revised so many times
+// today, not a code bug in the current payload. DELETE is idempotent here on purpose -- a 404
+// (nothing to delete) counts as success, since the goal is just "nothing left for this SKU."
+app.post("/api/ebay/reset-draft", async (req, res) => {
+  const { sku } = req.body || {};
+  if (!sku) return res.status(400).json({ error: { message: "Missing sku." } });
+  try {
+    try {
+      const existing = await ebayApiRequest(
+        "GET",
+        `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(EBAY_MARKETPLACE_ID)}`
+      );
+      for (const offer of existing.offers || []) {
+        await ebayApiRequest("DELETE", `/sell/inventory/v1/offer/${encodeURIComponent(offer.offerId)}`);
+      }
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
+    try {
+      await ebayApiRequest("DELETE", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`);
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("eBay reset-draft failed:", err);
     res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });

@@ -2219,6 +2219,36 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
       });
   }
 
+  // Round 62 follow-up: added after a draft that had been created/updated via the API many times
+  // in one debugging session (same SKU every time, since it's derived from pack.jobId) started
+  // failing publish with eBay's generic "Cannot revise listing... violation of eBay policy"
+  // message -- confirmed NOT an actual policy or account problem (a fresh listing published fine
+  // straight through eBay's own website, same account, same day), so most likely this one specific
+  // offer/inventory item picked up some bad state from being revised so many times. Rather than
+  // guess at more payload tweaks, this deletes the offer + inventory item for a pack's SKU
+  // server-side and clears the local draft state, so the next "Create eBay Draft" click starts
+  // that pack's eBay listing completely fresh instead of revising the possibly-stuck one.
+  function resetEbayDraft(key, pack) {
+    setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], resetting: true } }));
+    fetch("/api/ebay/reset-draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku: `bench-${pack.jobId}` }),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || (data && data.error)) throw new Error((data && data.error && data.error.message) || "Couldn't reset the eBay draft.");
+        setDraftStates((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      })
+      .catch((e) => {
+        setDraftStates((prev) => ({ ...prev, [key]: { ...prev[key], resetting: false, resetError: String((e && e.message) || e) } }));
+      });
+  }
+
   const activeJobs = jobs.filter((j) => j.status === "processing");
   const erroredJobs = jobs.filter((j) => j.status === "error");
 
@@ -2512,7 +2542,21 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
                       <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].offerDetailsError}</p>
                     )}
                     {draftStates[key].publishError && (
-                      <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].publishError}</p>
+                      <>
+                        <p className="identify-error" style={{ margin: "6px 0 0" }}>{draftStates[key].publishError}</p>
+                        <button
+                          type="button"
+                          className="link-btn"
+                          style={{ marginTop: 4 }}
+                          disabled={draftStates[key].resetting}
+                          onClick={() => resetEbayDraft(key, pack)}
+                        >
+                          {draftStates[key].resetting ? "Resetting…" : "Start this eBay draft over"}
+                        </button>
+                        {draftStates[key].resetError && (
+                          <p className="identify-error" style={{ margin: "4px 0 0" }}>{draftStates[key].resetError}</p>
+                        )}
+                      </>
                     )}
                     {draftStates[key].offerDetails && (
                       <div style={{ marginTop: 6, background: "var(--panel, #f4f1e8)", borderRadius: 6, padding: 10 }}>
