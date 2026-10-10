@@ -368,6 +368,21 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, {
       condition: EBAY_CONDITION,
       ...(Array.isArray(conditionDescriptors) && conditionDescriptors.length ? { conditionDescriptors } : {}),
+      // Round 62 follow-up: packageWeightAndSize lives on the INVENTORY ITEM, not the offer --
+      // confirmed against eBay's own InventoryItem schema after an earlier draft of this fix
+      // wrongly put it on the offer body below. eBay's docs describe it as the container used
+      // "if the seller is offering one or more calculated shipping options for the inventory
+      // item," which matches it living next to condition/product here rather than on the offer.
+      packageWeightAndSize: {
+        packageType: EBAY_PACKAGE_TYPE,
+        weight: { value: EBAY_PACKAGE_WEIGHT_OZ, unit: "OUNCE" },
+        dimensions: {
+          length: EBAY_PACKAGE_LENGTH_IN,
+          width: EBAY_PACKAGE_WIDTH_IN,
+          height: EBAY_PACKAGE_HEIGHT_IN,
+          unit: "INCH",
+        },
+      },
       product: {
         title: String(title).slice(0, 80),
         description,
@@ -393,16 +408,6 @@ app.post("/api/ebay/create-draft", async (req, res) => {
         fulfillmentPolicyId: EBAY_FULFILLMENT_POLICY_ID,
         paymentPolicyId: EBAY_PAYMENT_POLICY_ID,
         returnPolicyId: EBAY_RETURN_POLICY_ID,
-      },
-      packageWeightAndSize: {
-        packageType: EBAY_PACKAGE_TYPE,
-        weight: { value: EBAY_PACKAGE_WEIGHT_OZ, unit: "OUNCE" },
-        dimensions: {
-          length: EBAY_PACKAGE_LENGTH_IN,
-          width: EBAY_PACKAGE_WIDTH_IN,
-          height: EBAY_PACKAGE_HEIGHT_IN,
-          unit: "INCH",
-        },
       },
     };
     // eBay allows only one offer per SKU per marketplace, so createOffer fails with errorId
