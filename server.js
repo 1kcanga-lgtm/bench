@@ -107,6 +107,26 @@ const EBAY_CATEGORY_ID = process.env.EBAY_CATEGORY_ID || "261328";
 // as meaning "ungraded" -- 2750 means graded. USED_VERY_GOOD is the Inventory API's string enum
 // for numeric 4000. Also shared across environments, same reasoning as EBAY_CATEGORY_ID above.
 const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_VERY_GOOD";
+// Round 62 follow-up: publishing failed again, separately from the condition fixes above, with
+// "the package weight is not valid or is missing" -- the fulfillment policy's shipping cost is
+// calculated (carrier rate), which needs the OFFER to carry its own package weight/size, not
+// just the usual listing fields. createOffer doesn't require this (eBay only checks it at
+// publish time), so a draft can exist fine without it -- it's a separate validation pass.
+// Researched eBay's own package-type enum and weight/dimension schema (nothing specific to this
+// in the generic "publishing offers" requirements doc -- like conditionDescriptors, it's a
+// shipping-policy-driven requirement, not a generically-documented one). Defaults are a rough
+// estimate for a ~50-card lot shipped in a padded/rigid mailer (cards + toploaders + packaging);
+// tune the two env vars below if Kaleb's actual shipped weights run meaningfully different --
+// eBay uses this number to quote the buyer's calculated shipping cost, so a bad estimate shows
+// buyers the wrong shipping price rather than breaking the listing outright.
+const EBAY_PACKAGE_WEIGHT_OZ = Number(process.env.EBAY_PACKAGE_WEIGHT_OZ) || 8;
+const EBAY_PACKAGE_TYPE = process.env.EBAY_PACKAGE_TYPE || "PACKAGE_THICK_ENVELOPE";
+// Dimensions for that same padded mailer -- included alongside weight (even though eBay's error
+// only named weight) since calculated-shipping carriers can also need package size, and it costs
+// nothing to send both rather than risk a second round-trip to discover dimensions are needed too.
+const EBAY_PACKAGE_LENGTH_IN = Number(process.env.EBAY_PACKAGE_LENGTH_IN) || 9;
+const EBAY_PACKAGE_WIDTH_IN = Number(process.env.EBAY_PACKAGE_WIDTH_IN) || 6;
+const EBAY_PACKAGE_HEIGHT_IN = Number(process.env.EBAY_PACKAGE_HEIGHT_IN) || 1;
 const EBAY_FULFILLMENT_POLICY_ID = ebayEnvVar("FULFILLMENT_POLICY_ID");
 const EBAY_PAYMENT_POLICY_ID = ebayEnvVar("PAYMENT_POLICY_ID");
 const EBAY_RETURN_POLICY_ID = ebayEnvVar("RETURN_POLICY_ID");
@@ -373,6 +393,16 @@ app.post("/api/ebay/create-draft", async (req, res) => {
         fulfillmentPolicyId: EBAY_FULFILLMENT_POLICY_ID,
         paymentPolicyId: EBAY_PAYMENT_POLICY_ID,
         returnPolicyId: EBAY_RETURN_POLICY_ID,
+      },
+      packageWeightAndSize: {
+        packageType: EBAY_PACKAGE_TYPE,
+        weight: { value: EBAY_PACKAGE_WEIGHT_OZ, unit: "OUNCE" },
+        dimensions: {
+          length: EBAY_PACKAGE_LENGTH_IN,
+          width: EBAY_PACKAGE_WIDTH_IN,
+          height: EBAY_PACKAGE_HEIGHT_IN,
+          unit: "INCH",
+        },
       },
     };
     // eBay allows only one offer per SKU per marketplace, so createOffer fails with errorId
