@@ -1769,7 +1769,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
   const [expandedPackKeys, setExpandedPackKeys] = useState(() => new Set());
   const [expandedListingKeys, setExpandedListingKeys] = useState(() => new Set());
   const [drafts, setDrafts] = useState({}); // bundling card id -> editable form fields, for a needsReview card
-  const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, draftReady, env } from /api/ebay/status
+  const [ebayStatus, setEbayStatus] = useState(null); // { configured, connected, username, draftReady, env } from /api/ebay/status
   // Round 55: per-pack "Create eBay Draft" progress, keyed the same way as expandedListingKeys etc.
   // { status: "creating" | "done" | "error", offerId?, message? }. Not persisted -- a page refresh
   // just resets the button; clicking again on an already-drafted pack surfaces eBay's own
@@ -2034,6 +2034,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
         price: finalPrice,
         quantity: pack.listing.cards.length,
         imageUrls,
+        aspects: sections.aspects,
       }),
     })
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -2176,6 +2177,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
             price: finalPrice,
             quantity: pack.listing.cards.length,
             imageUrls: combined,
+            aspects: sections.aspects,
           }),
         })
           .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -2312,7 +2314,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
       <div style={{ textAlign: "center", marginTop: 14, fontSize: 13 }}>
         {ebayStatus === null ? null : ebayStatus.connected ? (
           <span style={{ opacity: 0.7 }}>
-            eBay ({ebayStatus.env}): connected
+            eBay ({ebayStatus.env}): connected{ebayStatus.username ? ` as ${ebayStatus.username}` : ""}
             {!ebayStatus.draftReady && (
               <> -- add {ebayStatus.missingDraftConfig.join(", ")} in Portainer to enable one-click drafts</>
             )}
@@ -3104,18 +3106,24 @@ function buildSellerListings(sellableCards, bundleSize) {
   return { listings, finalLeftover: mixed.leftover };
 }
 
+// Round 62: the min/max-year-to-label logic below was copy-pasted across suggestedListingTitle,
+// ebayListingTitle, and (now) buildListingAspects -- pulled into one helper so all three always
+// agree on what "the pack's years" means instead of three copies that could quietly drift.
+function cardYearRangeLabel(cards) {
+  const years = cards
+    .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
+    .filter((n) => !isNaN(n));
+  if (!years.length) return "Mixed Years";
+  return Math.min(...years) === Math.max(...years)
+    ? seasonYearLabel(Math.min(...years))
+    : `${Math.min(...years)}-${Math.max(...years)}`;
+}
+
 // A generic, eBay-ready draft title -- not tied to any specific team's branding, just what's
 // actually in the pack: how many cards, which brand(s), which year(s). Kaleb can always tweak the
 // wording himself before actually posting; this just saves starting from a blank field every time.
 function suggestedListingTitle(listing) {
-  const years = listing.cards
-    .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
-    .filter((n) => !isNaN(n));
-  const yearLabel = years.length
-    ? Math.min(...years) === Math.max(...years)
-      ? seasonYearLabel(Math.min(...years))
-      : `${Math.min(...years)}-${Math.max(...years)}`
-    : "Mixed Years";
+  const yearLabel = cardYearRangeLabel(listing.cards);
   const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
   const brandLabel = brands.length === 1 ? brands[0] : brands.length > 1 ? "Mixed Brands" : "";
   const subject = listing.kind === "mixed" ? "Mixed NHL Teams" : listing.team;
@@ -3138,22 +3146,18 @@ function listingTeamBreakdown(listing) {
 // disclaimer), are Kaleb's fixed wording every time -- only the bracketed bits are templated.
 function ebayListingTitle(listing, finalPrice) {
   const subject = listing.kind === "mixed" ? "Mixed Teams" : listing.team;
-  const years = listing.cards
-    .map((c) => parseInt(String(c.year || "").match(/\d{4}/)?.[0] || "", 10))
-    .filter((n) => !isNaN(n));
-  const yearLabel = years.length
-    ? Math.min(...years) === Math.max(...years)
-      ? seasonYearLabel(Math.min(...years))
-      : `${Math.min(...years)}-${Math.max(...years)}`
-    : "Mixed Years";
+  const yearLabel = cardYearRangeLabel(listing.cards);
   const brands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
   const brandLabel = brands.length === 1 ? brands[0] : "Mixed Brands";
   const yearsBrandsLabel = yearLabel === "Mixed Years" && brandLabel === "Mixed Brands" ? "Mixed Years/Brands" : `${yearLabel}/${brandLabel}`;
-  // 80-character eBay title limit -- drop the least essential clauses in order until it fits,
-  // and only hard-truncate as a last resort.
+  // Round 62: eBay's own "improve your listing" guidance flagged the title as light on buyer
+  // search terms -- "NHL" was previously the first thing dropped once a title ran long, even
+  // though it's a real search term and the estimated-value clause isn't (nobody searches "Est $60
+  // Value"; that's what the price field and filters are for). Reordered so NHL survives every
+  // attempt except the final hard-truncate fallback, and Est. Value is now the first to go.
   const attempts = [
-    `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel} - Est. ${moneyWhole(listing.total)} Value - NHL`,
-    `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel} - Est. ${moneyWhole(listing.total)} Value`,
+    `${subject} NHL Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel} - Est. ${moneyWhole(listing.total)} Value`,
+    `${subject} NHL Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel}`,
     `${subject} Hockey Card Lot - ${listing.cards.length} Cards - ${yearsBrandsLabel}`,
   ];
   const fit = attempts.find((t) => t.length <= 80);
@@ -3199,8 +3203,31 @@ function buildListingSections(listing, discountPct) {
     "Condition: Ungraded (raw, played/pulled from a personal collection)",
   ].join("\n");
 
+  // Round 62: the same facts as itemSpecifics above, but structured as eBay's Inventory API
+  // actually wants them (product.aspects -- an object of arrays) instead of plain copy-paste
+  // text. itemSpecifics only ever reached a buyer if Kaleb retyped it into eBay's own listing
+  // form by hand; this is what makes a Bench-created draft show up under eBay's own search
+  // filters (Sport, Team, Season, etc.) -- eBay's own "improve your listing" email flagged exactly
+  // this as hurting a listing's visibility. Single-value aspects only, since a lot can span
+  // multiple brands/seasons and a one-item array per aspect is what each of those would need --
+  // left off rather than guessed at when the pack isn't a single brand/season.
+  const aspects = {
+    Sport: ["Ice Hockey"],
+    League: ["NHL"],
+    Team: [subject],
+    Type: ["Lot"],
+    "Card Condition": ["Ungraded"],
+  };
+  const aspectYear = cardYearRangeLabel(listing.cards);
+  if (aspectYear !== "Mixed Years") aspects.Season = [aspectYear];
+  const aspectBrands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
+  if (aspectBrands.length === 1) aspects.Manufacturer = aspectBrands;
+
   const description = [
-    `${subject} Lot: ${listing.cards.length} Cards`,
+    // Round 62: opens with the same buyer search terms the title leads with (NHL, hockey card
+    // lot, the year range) instead of just the team name -- per eBay's "load your title [and
+    // description] with keywords" guidance.
+    `${subject} NHL Hockey Card Lot - ${listing.cards.length} Cards (${aspectYear})`,
     "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
     "",
     "What's in the lot (highest value first; ★ = pictured above)",
@@ -3227,7 +3254,7 @@ function buildListingSections(listing, discountPct) {
   // from the lot rather than following a generic photo checklist.
   const topCards = standouts;
 
-  return { title, photos, topCards, itemSpecifics, description, pricingSettings };
+  return { title, photos, topCards, itemSpecifics, aspects, description, pricingSettings };
 }
 
 function buildListingCopyText(listing, discountPct) {

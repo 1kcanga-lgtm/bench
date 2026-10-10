@@ -69,7 +69,17 @@ const EBAY_CERT_ID = ebayEnvVar("CERT_ID");
 const EBAY_RUNAME = ebayEnvVar("RUNAME");
 const EBAY_OAUTH_BASE = EBAY_IS_PRODUCTION ? "https://auth.ebay.com" : "https://auth.sandbox.ebay.com";
 const EBAY_API_BASE = EBAY_IS_PRODUCTION ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
-const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
+// Round 62: a separate host from EBAY_API_BASE -- eBay's Identity API (used only so Bench can show
+// Kaleb which eBay username it's actually connected as) lives under apiz.*, not api.*.
+const EBAY_IDENTITY_BASE = EBAY_IS_PRODUCTION ? "https://apiz.ebay.com" : "https://apiz.sandbox.ebay.com";
+const EBAY_SCOPES = [
+  "https://api.ebay.com/oauth/api_scope/sell.inventory",
+  // Round 62: lets the callback ask eBay "who is this token actually signed in as", so Bench can
+  // show "connected as rinkside_cards" instead of a bare connected/disconnected toggle -- added
+  // after Kaleb nearly connected Production under the wrong eBay login and had no way in the app
+  // itself to double-check which account it had grabbed.
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+];
 const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
 
 // Round 55: config for the actual "create eBay draft" call (createOrReplaceInventoryItem +
@@ -273,6 +283,10 @@ app.get("/api/ebay/status", (req, res) => {
   res.json({
     configured: EBAY_CONFIGURED,
     connected: !!(tokens && tokens.refresh_token),
+    // Round 62: the eBay username this environment's connection actually belongs to, so the
+    // frontend can show "connected as X" -- null for a connection made before this existed (and
+    // Kaleb hasn't reconnected since), or if the one-time identity lookup at connect time failed.
+    username: (tokens && tokens.username) || null,
     env: EBAY_ENV,
     // Separate from "connected" -- OAuth can succeed before business policies exist. Tells the
     // frontend exactly which env vars are still missing so it can say so instead of just hiding
@@ -308,7 +322,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
       },
     });
   }
-  const { sku, title, description, price, quantity, imageUrls } = req.body || {};
+  const { sku, title, description, price, quantity, imageUrls, aspects } = req.body || {};
   if (!sku || !title || !description || !price || !quantity) {
     return res.status(400).json({ error: { message: "Missing sku, title, description, price, or quantity." } });
   }
@@ -317,11 +331,15 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     // No merchantLocationKey here on purpose: it's only required at publish time, not at
     // creation, which is what lets this stay a true draft without Kaleb first having to set up
     // an Inventory Location (a whole separate API-only Sandbox step with no UI of its own).
+    // Round 62: aspects (item specifics -- Sport, Team, Season, etc.) are what eBay actually uses
+    // to surface a listing under buyers' search filters; optional and passed through as-is since
+    // the frontend is what knows what a sensible set looks like for a card lot.
     await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, {
       condition: EBAY_CONDITION,
       product: {
         title: String(title).slice(0, 80),
         description,
+        ...(aspects && typeof aspects === "object" && Object.keys(aspects).length ? { aspects } : {}),
         ...(Array.isArray(imageUrls) && imageUrls.length ? { imageUrls: imageUrls.slice(0, 12) } : {}),
       },
       availability: { shipToLocationAvailability: { quantity } },
@@ -501,12 +519,31 @@ app.get("/api/ebay/callback", async (req, res) => {
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error_description || data.error || "eBay rejected the authorization code.");
+    // Round 62: look up the actual eBay username this token belongs to, purely so Bench can show
+    // "connected as X" afterward. Non-fatal on purpose -- if this lookup fails for any reason, the
+    // connection itself still succeeds (username just stays blank) rather than the whole connect
+    // attempt failing over a display detail.
+    let username = null;
+    try {
+      const identityResp = await fetch(`${EBAY_IDENTITY_BASE}/commerce/identity/v1/user/`, {
+        headers: { Authorization: `Bearer ${data.access_token}` },
+      });
+      if (identityResp.ok) {
+        const identityData = await identityResp.json();
+        username = identityData.username || null;
+      }
+    } catch (identityErr) {
+      console.error("eBay identity lookup failed (non-fatal):", identityErr);
+    }
     setEbayTokens({
       refresh_token: data.refresh_token,
       access_token: data.access_token,
       access_token_expires_at: Date.now() + data.expires_in * 1000,
+      username,
     });
-    res.send("<h2>eBay account connected.</h2><p>You can close this tab and go back to Bench.</p>");
+    res.send(
+      `<h2>eBay account connected${username ? ` as ${username}` : ""}.</h2><p>You can close this tab and go back to Bench.</p>`
+    );
   } catch (err) {
     console.error("eBay OAuth callback failed:", err);
     res.status(500).send(`Connecting to eBay failed: ${String((err && err.message) || err)}. Close this tab and try again from Bench.`);
