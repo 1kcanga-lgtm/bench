@@ -3281,6 +3281,30 @@ function buildListingSections(listing, discountPct) {
   // are the only values this category (261328, Ice Hockey) supports.
   const conditionDescriptors = [{ name: "40001", values: ["400012"] }];
 
+  // Round 63: Kaleb's own concern -- a lot with several copies of the exact same card looked
+  // worse listing each copy as its own identical line (3-4 repeats in a row reads as padding,
+  // not extra value, and he worried buyers would bounce off that). Grouping identical cards into
+  // one line with an "x N" count is still fully honest about what's in the box -- the duplicate
+  // count is right there, nothing's hidden, and the total card count/value math below is
+  // untouched -- it's just the difference between a clean inventory line and a repeated one.
+  // Deliberately NOT collapsing further (e.g. hiding the count, or dropping duplicates from the
+  // list entirely): eBay listings have to describe what's actually shipped, and a buyer who gets
+  // duplicates they had no way to know about is a return/complaint risk, not a win. "Identical" is
+  // keyed on the same facts the line itself prints (player, year, brand, card number).
+  const cardGroups = [];
+  const cardGroupIndex = new Map();
+  for (const c of sortedCards) {
+    const groupKey = [c.player, seasonYearLabel(c.year), c.brand, c.cardNumber].join("|");
+    let group = cardGroupIndex.get(groupKey);
+    if (!group) {
+      group = { card: c, count: 0, starred: false };
+      cardGroupIndex.set(groupKey, group);
+      cardGroups.push(group);
+    }
+    group.count += 1;
+    if (standoutIds.has(c.id)) group.starred = true;
+  }
+
   const description = [
     // Round 62: opens with the same buyer search terms the title leads with (NHL, hockey card
     // lot, the year range) instead of just the team name -- per eBay's "load your title [and
@@ -3289,9 +3313,11 @@ function buildListingSections(listing, discountPct) {
     "I'm clearing out part of my personal collection, so I priced these using sold-listing comps and am passing the bulk discount on to you.",
     "",
     "What's in the lot (highest value first; ★ = pictured above)",
-    ...sortedCards.map((c) => {
+    ...cardGroups.map((g) => {
+      const c = g.card;
       const line = `${c.player}, ${[seasonYearLabel(c.year), c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}`;
-      return standoutIds.has(c.id) ? `★ ${line}` : line;
+      const withCount = g.count > 1 ? `${line} (x${g.count})` : line;
+      return g.starred ? `★ ${withCount}` : withCount;
     }),
     "",
     "The math",
