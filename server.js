@@ -459,6 +459,21 @@ app.post("/api/ebay/reset-draft", async (req, res) => {
         "GET",
         `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(EBAY_MARKETPLACE_ID)}`
       );
+      // Caught in review before this ever shipped: deleting an offer that's already PUBLISHED
+      // doesn't just clear a stuck draft, it ends the real, live, possibly-already-selling
+      // listing on eBay. The frontend only shows this button after a publish error, but that's
+      // not a real guarantee -- a later re-publish attempt on an already-live offer could still
+      // reach this route. Refuse outright rather than silently taking down a live listing; a
+      // seller who genuinely wants to end a live listing does that deliberately on eBay's own site.
+      const live = (existing.offers || []).find((o) => o.status === "PUBLISHED" || (o.listing && o.listing.listingId));
+      if (live) {
+        const err = new Error(
+          "This offer is already live on eBay (not just a stuck draft) -- refusing to delete it automatically. " +
+            "End or revise it directly on eBay's own site if that's really what you want."
+        );
+        err.status = 409;
+        throw err;
+      }
       for (const offer of existing.offers || []) {
         await ebayApiRequest("DELETE", `/sell/inventory/v1/offer/${encodeURIComponent(offer.offerId)}`);
       }
