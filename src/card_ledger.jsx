@@ -2266,13 +2266,32 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
     }
     return Array.from(byJob.entries())
       .map(([jobId, packCards]) => {
-        // Only look at cards that actually HAVE a team on file -- a still-unidentified/needsReview
-        // card's blank team shouldn't be enough on its own to make an otherwise single-team pack
-        // (e.g. 29 Bruins cards + 1 not-yet-identified scan) get mislabeled "Mixed Teams".
-        const knownTeams = Array.from(new Set(packCards.filter((c) => c.team).map((c) => c.team)));
-        const kind = knownTeams.length === 1 ? "team" : "mixed";
+        // Round 63: Kaleb's own call -- he scans a batch that's mostly one team plus a handful of
+        // others mixed in (e.g. 45 Flames + 5 others), and wants the pack named after whichever
+        // team actually has the most cards in it rather than falling back to "Mixed Teams" the
+        // moment a second team shows up at all. He said he'll rarely bundle a genuinely mixed pack
+        // on purpose, and will just rename it by hand on the rare occasion he does -- so this no
+        // longer tries to detect "really mixed" vs "mostly one team," it just always picks the
+        // plurality team. Still only counts cards that actually HAVE a team on file -- a still-
+        // unidentified/needsReview card's blank team doesn't count toward anyone's total, same
+        // reasoning as before. "mixed" now only happens when there's no identified team at all to
+        // name the pack after (every card in the batch still unidentified).
+        const teamCounts = new Map();
+        packCards.forEach((c) => {
+          if (!c.team) return;
+          teamCounts.set(c.team, (teamCounts.get(c.team) || 0) + 1);
+        });
+        let majorityTeam = null;
+        let majorityCount = 0;
+        teamCounts.forEach((count, team) => {
+          if (count > majorityCount) {
+            majorityTeam = team;
+            majorityCount = count;
+          }
+        });
+        const kind = majorityTeam ? "team" : "mixed";
         const total = packCards.reduce((s, c) => s + (Number(c.value) || 0), 0);
-        const listing = { kind, team: kind === "team" ? knownTeams[0] : null, cards: packCards, total };
+        const listing = { kind, team: majorityTeam, cards: packCards, total };
         const needsReviewCount = packCards.filter((c) => c.needsReview).length;
         const newestDate = Math.max(0, ...packCards.map((c) => c.dateAdded || 0));
         return { jobId, cards: packCards, listing, needsReviewCount, newestDate };
@@ -3316,7 +3335,12 @@ function buildListingSections(listing, discountPct) {
     ...cardGroups.map((g) => {
       const c = g.card;
       const line = `${c.player}, ${[seasonYearLabel(c.year), c.brand].filter(Boolean).join(" ")}${c.cardNumber ? ` #${c.cardNumber}` : ""}`;
-      const withCount = g.count > 1 ? `${line} (x${g.count})` : line;
+      // Round 63: a "team" pack can still include a few cards from other teams now that the pack
+      // is named after whichever team has the most cards rather than requiring every card to
+      // match -- those exceptions need to stay visible here, or a buyer reading "Calgary Flames
+      // Hockey Card Lot" has no way to know a couple of these aren't actually Flames cards.
+      const offTeam = listing.kind === "team" && c.team && c.team !== listing.team ? ` · ${c.team}` : "";
+      const withCount = g.count > 1 ? `${line} (x${g.count})${offTeam}` : `${line}${offTeam}`;
       return g.starred ? `★ ${withCount}` : withCount;
     }),
     "",
