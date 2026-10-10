@@ -72,14 +72,16 @@ const EBAY_API_BASE = EBAY_IS_PRODUCTION ? "https://api.ebay.com" : "https://api
 // Round 62: a separate host from EBAY_API_BASE -- eBay's Identity API (used only so Bench can show
 // Kaleb which eBay username it's actually connected as) lives under apiz.*, not api.*.
 const EBAY_IDENTITY_BASE = EBAY_IS_PRODUCTION ? "https://apiz.ebay.com" : "https://apiz.sandbox.ebay.com";
-const EBAY_SCOPES = [
-  "https://api.ebay.com/oauth/api_scope/sell.inventory",
-  // Round 62: lets the callback ask eBay "who is this token actually signed in as", so Bench can
-  // show "connected as rinkside_cards" instead of a bare connected/disconnected toggle -- added
-  // after Kaleb nearly connected Production under the wrong eBay login and had no way in the app
-  // itself to double-check which account it had grabbed.
-  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
-];
+// Round 62 follow-up: commerce.identity.readonly was added here to show "connected as X", but
+// eBay requires a scope to be explicitly enabled for the app (Application Keys -> OAuth Scopes)
+// before it'll actually grant it -- just listing it in an authorize/refresh request isn't enough.
+// We hadn't done that, so eBay silently granted only sell.inventory during the reconnect, then
+// started rejecting every later token REFRESH with "exceeds the scope granted to the client" once
+// the refresh request asked for the full list -- broke create-draft entirely. Reverted to the
+// single scope that's actually enabled so real listing work isn't blocked by a cosmetic feature.
+// To bring the username display back: enable commerce.identity.readonly for the app on eBay's
+// side first (both Sandbox and Production keysets), then re-add it here and reconnect.
+const EBAY_SCOPES = ["https://api.ebay.com/oauth/api_scope/sell.inventory"];
 const EBAY_CONFIGURED = !!(EBAY_APP_ID && EBAY_CERT_ID && EBAY_RUNAME);
 
 // Round 55: config for the actual "create eBay draft" call (createOrReplaceInventoryItem +
@@ -98,9 +100,13 @@ const EBAY_MARKETPLACE_ID = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
 // Shared across both environments -- eBay's category tree is the same catalog on Sandbox and
 // Production, not a per-account credential.
 const EBAY_CATEGORY_ID = process.env.EBAY_CATEGORY_ID || "261328";
-// Inventory API's condition enum has no single obvious value for "raw, ungraded trading card" --
-// USED_GOOD is the closest generic fit. Also shared across environments, same reasoning as above.
-const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_GOOD";
+// Round 62 follow-up: USED_GOOD (numeric condition ID 5000, "Good") turned out to be invalid for
+// this category -- publishing failed with "the provided condition id is invalid for the selected
+// primary category id." Confirmed via eBay's own condition-id docs: for trading card categories
+// specifically, numeric ID 4000 ("Very Good" everywhere else) is the one eBay's own policy treats
+// as meaning "ungraded" -- 2750 means graded. USED_VERY_GOOD is the Inventory API's string enum
+// for numeric 4000. Also shared across environments, same reasoning as EBAY_CATEGORY_ID above.
+const EBAY_CONDITION = process.env.EBAY_CONDITION || "USED_VERY_GOOD";
 const EBAY_FULFILLMENT_POLICY_ID = ebayEnvVar("FULFILLMENT_POLICY_ID");
 const EBAY_PAYMENT_POLICY_ID = ebayEnvVar("PAYMENT_POLICY_ID");
 const EBAY_RETURN_POLICY_ID = ebayEnvVar("RETURN_POLICY_ID");
@@ -322,7 +328,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
       },
     });
   }
-  const { sku, title, description, price, quantity, imageUrls, aspects } = req.body || {};
+  const { sku, title, description, price, quantity, imageUrls, aspects, conditionDescriptors } = req.body || {};
   if (!sku || !title || !description || !price || !quantity) {
     return res.status(400).json({ error: { message: "Missing sku, title, description, price, or quantity." } });
   }
@@ -334,8 +340,14 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     // Round 62: aspects (item specifics -- Sport, Team, Season, etc.) are what eBay actually uses
     // to surface a listing under buyers' search filters; optional and passed through as-is since
     // the frontend is what knows what a sensible set looks like for a card lot.
+    // Round 62 follow-up: conditionDescriptors is its OWN top-level field (sibling of condition
+    // and product, not nested inside aspects) -- eBay's trading-card categories require it
+    // separately, confirmed after "Card Condition (40001) is a required field" on publish. Name
+    // "40001" is eBay's fixed descriptor ID for "Card Condition" on ungraded cards; its value is
+    // one of eBay's fixed numeric IDs (400010-400013), not free text.
     await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, {
       condition: EBAY_CONDITION,
+      ...(Array.isArray(conditionDescriptors) && conditionDescriptors.length ? { conditionDescriptors } : {}),
       product: {
         title: String(title).slice(0, 80),
         description,
@@ -389,7 +401,7 @@ app.post("/api/ebay/create-draft", async (req, res) => {
     res.json({ ok: true, sku, offerId });
   } catch (err) {
     console.error("eBay create-draft failed:", err);
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -447,7 +459,7 @@ app.post("/api/ebay/publish/:offerId", async (req, res) => {
     res.json({ ok: true, listingId, viewUrl: listingId ? `${EBAY_VIEW_BASE}/${encodeURIComponent(listingId)}` : null });
   } catch (err) {
     console.error("eBay publish failed:", err);
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -482,7 +494,7 @@ app.get("/api/ebay/offer/:offerId", async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(502).json({ error: { message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { message: String((err && err.message) || err) } });
   }
 });
 
@@ -595,7 +607,7 @@ app.post("/api/anthropic/messages", async (req, res) => {
     const data = await upstream.json();
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: { type: "proxy_error", message: String((err && err.message) || err) } });
+    res.status(500).json({ error: { type: "proxy_error", message: String((err && err.message) || err) } });
   }
 });
 

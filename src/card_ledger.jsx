@@ -2035,6 +2035,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
         quantity: pack.listing.cards.length,
         imageUrls,
         aspects: sections.aspects,
+        conditionDescriptors: sections.conditionDescriptors,
       }),
     })
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -2178,6 +2179,7 @@ function BundlingPanel({ cards, sellerEligibleCards, getDisplay, onCardsMayHaveC
             quantity: pack.listing.cards.length,
             imageUrls: combined,
             aspects: sections.aspects,
+            conditionDescriptors: sections.conditionDescriptors,
           }),
         })
           .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -3211,17 +3213,29 @@ function buildListingSections(listing, discountPct) {
   // this as hurting a listing's visibility. Single-value aspects only, since a lot can span
   // multiple brands/seasons and a one-item array per aspect is what each of those would need --
   // left off rather than guessed at when the pack isn't a single brand/season.
+  // "Card Condition" is deliberately NOT in here -- found out the hard way (publish failing with
+  // "Card Condition (40001) is a required field" even though this object had it) that eBay's
+  // trading-card categories don't treat it as a free-text aspect at all. It's a separate
+  // conditionDescriptors field with a fixed numeric id/value vocabulary -- see below.
   const aspects = {
     Sport: ["Ice Hockey"],
     League: ["NHL"],
     Team: [subject],
     Type: ["Lot"],
-    "Card Condition": ["Ungraded"],
   };
   const aspectYear = cardYearRangeLabel(listing.cards);
   if (aspectYear !== "Mixed Years") aspects.Season = [aspectYear];
   const aspectBrands = Array.from(new Set(listing.cards.map((c) => c.brand).filter(Boolean)));
   if (aspectBrands.length === 1) aspects.Manufacturer = aspectBrands;
+
+  // Round 62 follow-up: eBay's required "Card Condition" field for ungraded trading cards, sent
+  // as its own conditionDescriptors entry (not an aspect -- see note above). "40001" is eBay's
+  // fixed descriptor id for this field; "400012" is eBay's fixed value id for "Very Good", chosen
+  // to match EBAY_CONDITION=USED_VERY_GOOD on the server and because it's a fair, non-overclaiming
+  // default for cards pulled from a personal collection rather than freshly graded. Confirmed via
+  // eBay's docs that 400010/400011/400012/400013 (Near Mint or Better/Excellent/Very Good/Poor)
+  // are the only values this category (261328, Ice Hockey) supports.
+  const conditionDescriptors = [{ name: "40001", values: ["400012"] }];
 
   const description = [
     // Round 62: opens with the same buyer search terms the title leads with (NHL, hockey card
@@ -3254,7 +3268,7 @@ function buildListingSections(listing, discountPct) {
   // from the lot rather than following a generic photo checklist.
   const topCards = standouts;
 
-  return { title, photos, topCards, itemSpecifics, aspects, description, pricingSettings };
+  return { title, photos, topCards, itemSpecifics, aspects, conditionDescriptors, description, pricingSettings };
 }
 
 function buildListingCopyText(listing, discountPct) {
